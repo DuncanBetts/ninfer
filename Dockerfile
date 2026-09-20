@@ -21,12 +21,17 @@ WORKDIR /src
 COPY . .
 
 # Keep source mtimes stable only when contents match; restored/older checkouts must
-# still rebuild changed inputs. Package versions isolate toolchain/dependency changes.
+# still rebuild changed inputs. Packages, the Dockerfile and CMake scripts identify
+# the configuration: removed flags and changed defaults must not reuse CMakeCache.txt.
 # Lock the mutable Ninja tree and copy deliverables out of the transient cache mount.
 RUN --mount=type=cache,id=ninfer-build,target=/build,sharing=locked \
     --mount=type=cache,target=/ccache \
     export CCACHE_DIR=/ccache CCACHE_MAXSIZE=20G \
-    && build_dir="/build/$(dpkg-query -W | sha256sum | cut -d ' ' -f 1)" \
+    && find . -type f \( -path ./Dockerfile -o -name CMakeLists.txt -o -name '*.cmake' \) \
+        -exec sha256sum {} + > /build/configuration \
+    && dpkg-query -W >> /build/configuration \
+    && LC_ALL=C sort -o /build/configuration /build/configuration \
+    && build_dir="/build/$(sha256sum /build/configuration | cut -d ' ' -f 1)" \
     && rsync --recursive --links --checksum --delete /src/ /build/src/ \
     && cmake -S /build/src -B "$build_dir" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \

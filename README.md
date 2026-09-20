@@ -221,10 +221,18 @@ can reuse compiler outputs when compilation is needed again. The build prints cu
 statistics, which do not count work skipped by Ninja.
 
 Source synchronization compares contents and removes deleted files, so restored files with older
-timestamps still rebuild correctly. The mutable build-tree cache is locked during each build and
-uses separate build directories for different installed toolchain/library versions. Missing or
-evicted caches cause a normal rebuild. Finished binaries are copied out of the cache into the image;
-ccache and the synchronization tool are only installed in the build stage.
+timestamps still rebuild correctly. Installed package versions, the Dockerfile, and CMake script
+contents select the build directory. Different inputs use separate CMake configurations, so
+removed compiler flags and changed cached defaults cannot silently survive from an earlier build.
+Ordinary source edits retain the incremental build tree; ccache remains shared across configurations.
+
+The mutable build-tree cache is locked for the whole build. Concurrent builds using this cache on
+the same builder wait for one another, including builds from different checkouts; switching branches
+also updates the shared source mirror. The 20 GiB limit applies only to ccache, not to the separate
+Ninja build directories. Old configuration directories remain until the build cache is removed or
+reclaimed by the builder. Missing or evicted caches cause a normal rebuild. Finished binaries are
+copied out of the cache into the image; ccache and the synchronization tool are only installed in the
+build stage.
 
 Mount the downloaded model and run the same example server profile:
 
