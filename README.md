@@ -188,11 +188,10 @@ cmake --build build -j
 ccache --show-stats
 ```
 
-These commands run directly on the host; no container tooling is required. Keep the `build/`
-directory for incremental builds: Ninja skips unchanged targets, while ccache can reuse C, C++,
-and CUDA compiler outputs when compilation is needed again. ccache uses its normal per-user
-cache; `CCACHE_DIR` and `CCACHE_MAXSIZE` can override its location and size limit. Statistics are
-cumulative, and an unchanged Ninja build adds no compiler-cache calls.
+No container tooling is required. Keep `build/` so Ninja can skip unchanged targets; ccache reuses
+compiler outputs when compilation is needed again. Set `CCACHE_DIR` and `CCACHE_MAXSIZE` to override
+ccache's default per-user location and size limit. Statistics are cumulative and exclude work
+skipped by Ninja.
 
 The ordinary build above does not require ccache. To disable it in a build directory previously
 configured with these launchers, clear the cached CMake settings:
@@ -213,28 +212,20 @@ Build the runtime image on a host with the NVIDIA Container Toolkit:
 docker build --tag ninfer:local .
 ```
 
-The Dockerfile combines the standard compiler launchers above with persistent CMake/Ninja and
-ccache [build cache mounts](https://docs.docker.com/build/cache/optimize/#use-cache-mounts).
-Use Docker BuildKit or another builder supporting `RUN --mount=type=cache`. Ninja skips unchanged
-build steps; ccache reuses compiler outputs when compilation is needed again. Printed ccache
-statistics are cumulative and exclude work skipped by Ninja.
+Use Docker BuildKit or another builder supporting
+[cache mounts](https://docs.docker.com/build/cache/optimize/#use-cache-mounts)
+(`RUN --mount=type=cache`). The Dockerfile automatically retains both the Ninja build tree and
+ccache for the complementary benefits described above. Missing caches rebuild normally.
 
-Source synchronization checks contents and removes deleted files, handling restored files with old
-timestamps. Installed package versions, the Dockerfile, and CMake scripts select separate build
-directories to prevent stale flags or cached defaults crossing configurations. Ordinary source
-edits retain the Ninja tree; ccache is shared across configurations. Missing caches rebuild normally.
+This mainly benefits frequent development rebuilds, not inference speed or runtime memory use.
+Builds sharing the cache on one builder serialize, including different checkouts. The 20 GiB limit
+applies only to ccache; Ninja build directories consume additional disk space until the build cache
+is removed or reclaimed by the builder.
 
-The build-tree lock serializes builds sharing the cache on one builder, including different
-checkouts; branch switches update the shared source mirror. Only ccache has a 20 GiB limit.
-Ninja directories accumulate until the build cache is removed or reclaimed by the builder.
-
-This is most useful for frequent development rebuilds; occasional builds benefit less from the
-extra state and disk usage. It does not improve inference speed or runtime memory use: finished
-binaries are copied out of the cache, and ccache and rsync stay in the build stage. Future
-configuration inputs must remain covered by the cache key, which is not a reproducible-build
-guarantee. When changing this workflow, run the
-[build-cache regression check](tests/README.md#container-build-cache) with the intended builder;
-it checks invalidation and incremental builds without running NInfer.
+The [Dockerfile](Dockerfile) owns source synchronization and configuration invalidation. When
+changing this workflow, run the [build-cache regression check](tests/README.md#container-build-cache)
+with the intended builder. It checks invalidation and incremental builds without running NInfer;
+caching alone does not guarantee reproducible builds.
 
 Mount the downloaded model and run the same example server profile:
 
