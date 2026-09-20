@@ -234,6 +234,20 @@ reclaimed by the builder. Missing or evicted caches cause a normal rebuild. Fini
 copied out of the cache into the image; ccache and the synchronization tool are only installed in the
 build stage.
 
+This caching is most useful for frequent container rebuilds during development. The compiler
+launchers are standard CMake settings; retaining the entire Ninja build tree is an additional
+optimization that skips unchanged compilation altogether. For occasional image builds, the savings
+may matter less than the extra disk usage, serialized builds, and configuration-management work.
+A ccache-only container recipe would be simpler, but would lose Ninja's ability to skip unchanged
+build steps. These are build-time tradeoffs, not improvements to inference speed or runtime memory
+usage.
+
+Persistent build state also needs maintenance: future changes to configuration inputs must remain
+covered by the cache key. The current invalidation rules address stale settings, but do not by
+themselves guarantee reproducible builds. The [container build-cache regression check](tests/README.md#container-build-cache)
+exercises these boundaries without running NInfer and should be run with the intended container
+builder when changing this workflow.
+
 Mount the downloaded model and run the same example server profile:
 
 ```bash
