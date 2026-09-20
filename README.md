@@ -213,40 +213,28 @@ Build the runtime image on a host with the NVIDIA Container Toolkit:
 docker build --tag ninfer:local .
 ```
 
-The Dockerfile enables the same compiler launchers automatically and uses
-[build cache mounts](https://docs.docker.com/build/cache/optimize/#use-cache-mounts) for both the
-CMake/Ninja build tree and ccache (limited to 20 GiB). Use Docker BuildKit or another builder that
-supports `RUN --mount=type=cache`. After source edits, Ninja rebuilds only affected targets; ccache
-can reuse compiler outputs when compilation is needed again. The build prints cumulative ccache
-statistics, which do not count work skipped by Ninja.
+The Dockerfile combines the standard compiler launchers above with persistent CMake/Ninja and
+ccache [build cache mounts](https://docs.docker.com/build/cache/optimize/#use-cache-mounts).
+Use Docker BuildKit or another builder supporting `RUN --mount=type=cache`. Ninja skips unchanged
+build steps; ccache reuses compiler outputs when compilation is needed again. Printed ccache
+statistics are cumulative and exclude work skipped by Ninja.
 
-Source synchronization compares contents and removes deleted files, so restored files with older
-timestamps still rebuild correctly. Installed package versions, the Dockerfile, and CMake script
-contents select the build directory. Different inputs use separate CMake configurations, so
-removed compiler flags and changed cached defaults cannot silently survive from an earlier build.
-Ordinary source edits retain the incremental build tree; ccache remains shared across configurations.
+Source synchronization checks contents and removes deleted files, handling restored files with old
+timestamps. Installed package versions, the Dockerfile, and CMake scripts select separate build
+directories to prevent stale flags or cached defaults crossing configurations. Ordinary source
+edits retain the Ninja tree; ccache is shared across configurations. Missing caches rebuild normally.
 
-The mutable build-tree cache is locked for the whole build. Concurrent builds using this cache on
-the same builder wait for one another, including builds from different checkouts; switching branches
-also updates the shared source mirror. The 20 GiB limit applies only to ccache, not to the separate
-Ninja build directories. Old configuration directories remain until the build cache is removed or
-reclaimed by the builder. Missing or evicted caches cause a normal rebuild. Finished binaries are
-copied out of the cache into the image; ccache and the synchronization tool are only installed in the
-build stage.
+The build-tree lock serializes builds sharing the cache on one builder, including different
+checkouts; branch switches update the shared source mirror. Only ccache has a 20 GiB limit.
+Ninja directories accumulate until the build cache is removed or reclaimed by the builder.
 
-This caching is most useful for frequent container rebuilds during development. The compiler
-launchers are standard CMake settings; retaining the entire Ninja build tree is an additional
-optimization that skips unchanged compilation altogether. For occasional image builds, the savings
-may matter less than the extra disk usage, serialized builds, and configuration-management work.
-A ccache-only container recipe would be simpler, but would lose Ninja's ability to skip unchanged
-build steps. These are build-time tradeoffs, not improvements to inference speed or runtime memory
-usage.
-
-Persistent build state also needs maintenance: future changes to configuration inputs must remain
-covered by the cache key. The current invalidation rules address stale settings, but do not by
-themselves guarantee reproducible builds. The [container build-cache regression check](tests/README.md#container-build-cache)
-exercises these boundaries without running NInfer and should be run with the intended container
-builder when changing this workflow.
+This is most useful for frequent development rebuilds; occasional builds benefit less from the
+extra state and disk usage. It does not improve inference speed or runtime memory use: finished
+binaries are copied out of the cache, and ccache and rsync stay in the build stage. Future
+configuration inputs must remain covered by the cache key, which is not a reproducible-build
+guarantee. When changing this workflow, run the
+[build-cache regression check](tests/README.md#container-build-cache) with the intended builder;
+it checks invalidation and incremental builds without running NInfer.
 
 Mount the downloaded model and run the same example server profile:
 
