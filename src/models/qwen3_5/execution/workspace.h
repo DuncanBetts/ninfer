@@ -49,7 +49,6 @@ Tensor visual_scatter_indices(Allocator& allocator, std::int32_t tokens) {
 }
 
 struct TextAttentionProjectionRoots {
-    Tensor hidden;
     Tensor query;
     Tensor gate;
     Tensor key;
@@ -60,7 +59,6 @@ template <class Allocator>
 TextAttentionProjectionRoots
 text_attention_projection(Allocator& allocator, const TextConfig& config, std::int32_t tokens) {
     return {
-        matrix(allocator, DType::BF16, dimension(config.hidden_size), tokens),
         matrix(allocator, DType::BF16, dimension(config.attention->query_width()), tokens),
         matrix(allocator, DType::BF16, dimension(config.attention->query_width()), tokens),
         matrix(allocator, DType::BF16, dimension(config.attention->key_width()), tokens),
@@ -132,11 +130,6 @@ Tensor gdn_normalized_output(Allocator& allocator, const TextConfig& config, std
     return matrix(allocator, DType::BF16, dimension(config.gdn->value_width()), tokens);
 }
 
-template <class Allocator>
-Tensor post_mixer_hidden(Allocator& allocator, const TextConfig& config, std::int32_t tokens) {
-    return matrix(allocator, DType::BF16, dimension(config.hidden_size), tokens);
-}
-
 struct MtpStemRoots {
     Tensor embedding;
     Tensor normalized_embedding;
@@ -198,14 +191,12 @@ MtpAttentionResultRoots mtp_attention_results(Allocator& allocator, const TextCo
 
 struct MtpPostAttentionRoots {
     Tensor output;
-    Tensor post_mixer_hidden;
 };
 
 template <class Allocator>
 MtpPostAttentionRoots mtp_post_attention(Allocator& allocator, const TextConfig& config,
                                          std::int32_t tokens) {
     return {
-        matrix(allocator, DType::BF16, dimension(config.hidden_size), tokens),
         matrix(allocator, DType::BF16, dimension(config.hidden_size), tokens),
     };
 }

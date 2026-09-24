@@ -21,7 +21,7 @@ Fp8AttnInputRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (!allows_a8(policy)) {
         throw std::invalid_argument("fp8 attn_input_proj: unsupported policy");
     }
-    return tokens >= 5 ? Fp8AttnInputRoute::A8 : Fp8AttnInputRoute::A16;
+    return fp8_attn_input_a8_route(tokens) ? Fp8AttnInputRoute::A8 : Fp8AttnInputRoute::A16;
 }
 
 void launch_a16(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, Tensor& k,
@@ -37,6 +37,13 @@ void launch_a16(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate, 
 }
 
 } // namespace
+bool fp8_attn_input_fused_rmsnorm_route(LinearPolicy policy, std::int32_t tokens) {
+    // A route query. The resolver throws where a policy admits no A8 kernel and no A16 kernel is
+    // registered, so those inputs answer false here instead of surfacing an exception.
+    if (tokens <= 0 || !valid_linear_policy(policy)) { return false; }
+    const Fp8AttnInputRoute route = resolve_route(policy, tokens);
+    return route == Fp8AttnInputRoute::A8;
+}
 
 std::size_t fp8_attn_input_workspace_capacity_bytes(LinearPolicy policy, std::int32_t min_tokens,
                                                     std::int32_t max_tokens) {

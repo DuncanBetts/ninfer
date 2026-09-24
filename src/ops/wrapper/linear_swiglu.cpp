@@ -1,5 +1,7 @@
+#include "core/layout.h"
 #include "core/weight.h"
 #include "ninfer/ops/linear_swiglu.h"
+#include "ninfer/ops/rmsnorm.h"
 
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
@@ -8,6 +10,8 @@
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/q8/q8_linear_swiglu_plan.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 
@@ -135,6 +139,83 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, WorkspaceArena& ws,
                    cudaStream_t stream) {
     linear_swiglu(x, gate_up_weight, out, LinearPolicy::A16Only, ws, stream);
+}
+
+namespace {
+
+// The norm folds into the projection's own activation quantizer only on the route that consumes the
+// normalized row directly. Every other weight format, policy or token count materializes it.
+bool rmsnorm_folds_into_swiglu_producer(const Weight& weight, LinearPolicy policy,
+                                        std::int32_t tokens) {
+    const bool profile = weight.qtype == QType::NVFP4 && weight.n == 34816 && weight.k == 5120 &&
+                         weight.padded_shape[0] == 34816 && weight.padded_shape[1] == 5120;
+    return profile && detail::nvfp4_linear_swiglu_tma_fused_route(policy, tokens);
+}
+
+std::size_t normalized_image_bytes(std::int32_t rows, std::int32_t tokens) {
+    WorkspaceLayoutBuilder layout;
+    (void)layout.alloc(DType::BF16, {rows, tokens});
+    return layout.peak_bytes(1);
+}
+
+} // namespace
+
+std::size_t
+rmsnorm_linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
+                                               std::int32_t input_rows, LinearPolicy policy,
+                                               std::int32_t min_tokens, std::int32_t max_tokens) {
+    const auto need = [&](std::int32_t tokens) {
+        const std::size_t projection = linear_swiglu_workspace_capacity_bytes(
+            qtype, gate_up_rows, input_rows, policy, tokens, tokens);
+        const bool folds = qtype == QType::NVFP4 && gate_up_rows == 34816 && input_rows == 5120 &&
+                           detail::nvfp4_linear_swiglu_tma_fused_route(policy, tokens);
+        return folds ? projection
+                     : projection + normalized_image_bytes(input_rows, tokens);
+    };
+    return std::max(need(min_tokens), need(max_tokens));
+}
+
+void rmsnorm_linear_swiglu(const Tensor& residual, const Tensor& norm_gain, float eps,
+                           const Weight& gate_up_weight, Tensor& out, LinearPolicy policy,
+                           WorkspaceArena& ws, cudaStream_t stream) {
+    validate_policy(policy);
+    if (residual.dtype != DType::BF16 || norm_gain.dtype != DType::BF16 ||
+        out.dtype != DType::BF16) {
+        throw std::invalid_argument("rmsnorm_linear_swiglu: residual/gain/out must be BF16");
+    }
+    if (!(eps > 0.0f) || !std::isfinite(eps)) {
+        throw std::invalid_argument("rmsnorm_linear_swiglu: eps must be positive and finite");
+    }
+    const std::int32_t hidden = gate_up_weight.k;
+    const std::int32_t t       = residual.ne[1];
+    if (hidden <= 0) {
+        throw std::invalid_argument("rmsnorm_linear_swiglu: invalid weight input rows");
+    }
+    if (t <= 0 || residual.ne[0] != hidden || residual.ne[2] != 1 || residual.ne[3] != 1 ||
+        out.ne[0] * 2 != gate_up_weight.n || out.ne[1] != t || out.ne[2] != 1 || out.ne[3] != 1 ||
+        norm_gain.ne[0] != hidden || norm_gain.ne[1] != 1 || norm_gain.ne[2] != 1 ||
+        norm_gain.ne[3] != 1) {
+        throw std::invalid_argument("rmsnorm_linear_swiglu: invalid tensor shape");
+    }
+    if (!residual.is_contiguous() || !norm_gain.is_contiguous() || !out.is_contiguous()) {
+        throw std::invalid_argument("rmsnorm_linear_swiglu: tensors must be contiguous");
+    }
+    if (!aligned_to(residual.data, 16) || !aligned_to(norm_gain.data, 4) ||
+        !aligned_to(out.data, 16)) {
+        throw std::invalid_argument("rmsnorm_linear_swiglu: missing required alignment");
+    }
+
+    const auto scope = ws.scope();
+    if (rmsnorm_folds_into_swiglu_producer(gate_up_weight, policy, t)) {
+        (void)detail::validate_nvfp4_weight(gate_up_weight, "rmsnorm_linear_swiglu");
+        detail::nvfp4_linear_swiglu_fused_rmsnorm_launch(residual, norm_gain, eps, gate_up_weight,
+                                                         out, ws, stream);
+        return;
+    }
+
+    Tensor normalized = ws.alloc(DType::BF16, {hidden, t});
+    rmsnorm(residual, norm_gain, eps, true, normalized, stream);
+    linear_swiglu(normalized, gate_up_weight, out, policy, ws, stream);
 }
 
 } // namespace ninfer::ops

@@ -135,21 +135,20 @@ __launch_bounds__(Block) __global__
                               rmsnorm_epilogue<Epilogue>(x1.y, inv, w1.y, z1.y));
 }
 
-// Fast geometry for wide rows. One CTA owns one row and keeps up to MaxPairsPerThread BF16x2
-// values per lane. The launcher admits only widths evenly divisible by the CTA vector span.
-template <RmsEpilogue Epilogue, int Block, int MaxPairsPerThread, bool Prefetch, int FixedD = 0>
-__launch_bounds__(Block) __global__
-    void rmsnorm_cta_bf16x2_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
-                                   const __nv_bfloat162* z, __nv_bfloat162* out,
-                                   std::int32_t input_d, std::int64_t rows, float eps) {
-    const int d = FixedD ? FixedD : input_d;
+// Row-local body of the wide-row kernel: one CTA reduces one row's sum of squares with pair
+// ownership `threadIdx.x + k * Block`, then applies the epilogue. Pointers are already offset to
+// the row and `z` is only read when Gated. The fused NVFP4 linear-SwiGLU entry calls this so its
+// in-shared normalized image is bit-identical to what this file's kernel writes to memory.
+template <RmsEpilogue Epilogue, int Block, int MaxPairsPerThread, bool Prefetch, int FixedD>
+__device__ __forceinline__ void rmsnorm_cta_row_bf16x2(const __nv_bfloat162* x,
+                                                       const __nv_bfloat162* weight,
+                                                       const __nv_bfloat162* z,
+                                                       __nv_bfloat162* out, std::int32_t input_d,
+                                                       float eps) {
+    const int d                = FixedD ? FixedD : input_d;
     static_assert(Block % kWarpSize == 0);
-    const std::int64_t row = static_cast<std::int64_t>(blockIdx.x);
-    if (row >= rows) { return; }
-
-    const int pairs             = d / 2;
-    const int pairs_per_thread  = pairs / Block;
-    const std::int64_t row_base = row * static_cast<std::int64_t>(pairs);
+    const int pairs            = d / 2;
+    const int pairs_per_thread = pairs / Block;
     __nv_bfloat162 values[MaxPairsPerThread];
     // Neither the weight nor the gate depends on the sum of squares, so under Prefetch both
     // are issued in the same pass as x and the two trips to memory overlap instead of running
@@ -163,10 +162,10 @@ __launch_bounds__(Block) __global__
     for (int k = 0; k < MaxPairsPerThread; ++k) {
         if (k < pairs_per_thread) {
             const int pair = static_cast<int>(threadIdx.x) + k * Block;
-            values[k]      = x[row_base + pair];
+            values[k]      = x[pair];
             if constexpr (Prefetch) {
                 weights[k] = weight[pair];
-                if constexpr (Epilogue == RmsEpilogue::Gated) { gates[k] = z[row_base + pair]; }
+                if constexpr (Epilogue == RmsEpilogue::Gated) { gates[k] = z[pair]; }
             }
             const float2 xf = __bfloat1622float2(values[k]);
             sum += xf.x * xf.x + xf.y * xf.y;
@@ -192,16 +191,30 @@ __launch_bounds__(Block) __global__
                 if constexpr (Epilogue == RmsEpilogue::Gated) { z_pair = gates[k]; }
             } else {
                 w_pair = weight[pair];
-                if constexpr (Epilogue == RmsEpilogue::Gated) { z_pair = z[row_base + pair]; }
+                if constexpr (Epilogue == RmsEpilogue::Gated) { z_pair = z[pair]; }
             }
             const float2 wf = __bfloat1622float2(w_pair);
             float2 zf{0.0f, 0.0f};
             if constexpr (Epilogue == RmsEpilogue::Gated) { zf = __bfloat1622float2(z_pair); }
-            out[row_base + pair] =
-                __floats2bfloat162_rn(rmsnorm_epilogue<Epilogue>(xf.x, inv, wf.x, zf.x),
-                                      rmsnorm_epilogue<Epilogue>(xf.y, inv, wf.y, zf.y));
+            out[pair] = __floats2bfloat162_rn(rmsnorm_epilogue<Epilogue>(xf.x, inv, wf.x, zf.x),
+                                              rmsnorm_epilogue<Epilogue>(xf.y, inv, wf.y, zf.y));
         }
     }
+}
+
+// Fast geometry for wide rows. One CTA owns one row and keeps up to MaxPairsPerThread BF16x2
+// values per lane. The launcher admits only widths evenly divisible by the CTA vector span.
+template <RmsEpilogue Epilogue, int Block, int MaxPairsPerThread, bool Prefetch, int FixedD = 0>
+__launch_bounds__(Block) __global__
+    void rmsnorm_cta_bf16x2_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
+                                   const __nv_bfloat162* z, __nv_bfloat162* out,
+                                   std::int32_t input_d, std::int64_t rows, float eps) {
+    const std::int64_t row = static_cast<std::int64_t>(blockIdx.x);
+    if (row >= rows) { return; }
+    const int d               = FixedD ? FixedD : input_d;
+    const std::int64_t row_base = row * static_cast<std::int64_t>(d / 2);
+    rmsnorm_cta_row_bf16x2<Epilogue, Block, MaxPairsPerThread, Prefetch, FixedD>(
+        x + row_base, weight, z + row_base, out + row_base, input_d, eps);
 }
 
 // Implements: include/ninfer/ops/rmsnorm.h

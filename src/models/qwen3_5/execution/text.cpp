@@ -11,7 +11,6 @@
 #include "models/qwen3_5/execution/vision.h"
 #include "models/qwen3_5/program/vision_control.h"
 #include "ninfer/ops/argmax.h"
-#include "ninfer/ops/attn_input_proj.h"
 #include "ninfer/ops/causal_conv1d_silu.h"
 #include "ninfer/ops/embedding.h"
 #include "ninfer/ops/gated_delta_net.h"
@@ -401,12 +400,9 @@ void TextContext::mtp_forward_tail(Tensor& x, const Tensor& ah, const Tensor& po
     project(a.view({dimension(config_.attention->query_width()), T}), mtp_->output, o, work_, s);
     ops::residual_add(o, x, s);
 
-    Tensor mh = post.post_mixer_hidden;
-    ops::rmsnorm(x, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, s);
-
     {
         auto post_mixer_scope = work_.scope();
-        ffn(mh, mtp_->ffn, x, {}, work_, s, true);
+        ffn(x, mtp_->post_attention_norm, config_.rms_norm_eps, mtp_->ffn, x, {}, work_, s, true);
     }
 
     Tensor flat_mtp_hidden = mtp_hidden.view({dimension(config_.hidden_size), T});
@@ -550,11 +546,10 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
                 s);
         ops::residual_add(o, x_last, s);
 
-        Tensor mh = work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
-        ops::rmsnorm(x_last, mtp_->post_attention_norm, config_.rms_norm_eps, true, mh, s);
         {
             auto post_mixer_scope = work_.scope();
-            ffn(mh, mtp_->ffn, x_last, {}, work_, s, true);
+            ffn(x_last, mtp_->post_attention_norm, config_.rms_norm_eps, mtp_->ffn, x_last, {},
+                work_, s, true);
         }
         ops::rmsnorm(x_last, mtp_->final_norm, config_.rms_norm_eps, true, *final_hidden, s);
         proposal_argmax(*final_hidden, *logits, *draft_token);
@@ -846,8 +841,6 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
     }
 
     const auto projection = workspace::text_attention_projection(work_, config_, T);
-    Tensor h              = projection.hidden;
-    ops::rmsnorm(x, w.input_norm, config_.rms_norm_eps, true, h, s);
 
     Tensor q         = projection.query.view({dimension(config_.attention->head_dim),
                                               dimension(config_.attention->num_attention_heads), T});
@@ -861,7 +854,8 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
     Tensor gate_flat = gate.view({dimension(config_.attention->query_width()), T});
     Tensor k_flat    = k.view({dimension(config_.attention->key_width()), T});
     Tensor v_flat    = v.view({dimension(config_.attention->key_width()), T});
-    attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s);
+    attention_projection(x, w.input_norm, config_.rms_norm_eps, p, q_flat, gate_flat, k_flat,
+                         v_flat, work_, s);
 
     const auto results = workspace::text_attention_results(work_, config_, T);
     Tensor qn =
@@ -1068,9 +1062,8 @@ ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
 
 void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase,
                            const ops::SparseMoeHints& hints) {
-    Tensor h = workspace::post_mixer_hidden(work_, config_, x.ne[1]);
-    ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
-    ffn(h, weights.ffn, x, hints, work_, ctx_.stream);
+    ffn(x, weights.post_attention_norm, config_.rms_norm_eps, weights.ffn, x, hints, work_,
+        ctx_.stream);
 }
 
 template <class Tap>

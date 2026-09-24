@@ -84,4 +84,40 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, WorkspaceArena& ws,
                    cudaStream_t stream);
 
+/**
+ * Transient workspace needed by rmsnorm_linear_swiglu() over [min_tokens,max_tokens]. On a route
+ * whose producer quantizes the normalized row it is about to consume this equals
+ * linear_swiglu_workspace_capacity_bytes() for the same profile, `policy` and token count.
+ * Everywhere else it adds the BF16 [input_rows,tokens] normalized image the Op has to materialize.
+ */
+[[nodiscard]] std::size_t
+rmsnorm_linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
+                                               std::int32_t input_rows, LinearPolicy policy,
+                                               std::int32_t min_tokens, std::int32_t max_tokens);
+
+/**
+ * Applies the unit-offset input RMSNorm and the gate/up projection with SwiGLU as one semantic Op, so
+ * the caller never writes the normalized row.
+ *
+ * Math / indexing:
+ *   y = RmsNorm(residual, norm_gain, eps) with the unit-offset weight convention;
+ *   out = LinearSwiGLU(y, gate_up_weight) evaluated on that same normalized image.
+ *
+ * On the NVFP4 [34816,5120] route whose producer quantizes the activation before projecting it, the
+ * norm is that route's prologue: one kernel takes the NVFP4 codes and block scales directly from
+ * `residual` and the normalized row never reaches memory. On any other weight format, `policy` or
+ * token count the Op materializes the normalized row in `ws` and runs the standalone projection.
+ * Which branch runs is the Op's own choice and is not observable except through `ws` capacity; both
+ * branches are bit-identical to rmsnorm() followed by linear_swiglu() on the same route.
+ *
+ * Effects / workspace:
+ *   residual/gain/out are contiguous BF16 with residual [D,T], norm_gain [D,1,1,1] where D is the
+ *   weight's input rows, and out [gate_up_rows/2,T]; eps must be finite and positive. The output is
+ *   written in full and must not alias an input. `ws` is sized by
+ *   rmsnorm_linear_swiglu_workspace_capacity_bytes(). There is no persistent state side effect.
+ */
+void rmsnorm_linear_swiglu(const Tensor& residual, const Tensor& norm_gain, float eps,
+                           const Weight& gate_up_weight, Tensor& out, LinearPolicy policy,
+                           WorkspaceArena& ws, cudaStream_t stream);
+
 } // namespace ninfer::ops

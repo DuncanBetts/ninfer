@@ -79,6 +79,42 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight,
                      WorkspaceArena& workspace, cudaStream_t stream);
 
 /**
+ * Transient workspace needed by rmsnorm_attn_input_proj() over [min_tokens,max_tokens]. On a route
+ * whose producer quantizes the normalized row it is about to consume this equals
+ * attn_input_proj_workspace_capacity_bytes() for the same parent, `policy` and token count.
+ * Everywhere else it adds the BF16 [input_rows,tokens] normalized image the Op has to materialize.
+ */
+[[nodiscard]] std::size_t
+rmsnorm_attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int32_t parent_rows,
+                                                 std::int32_t input_rows, LinearPolicy policy,
+                                                 std::int32_t min_tokens, std::int32_t max_tokens);
+
+/**
+ * Applies the unit-offset input RMSNorm and the single-parent Q/output-gate/K/V projection as one
+ * semantic Op, so the caller never writes the normalized row. Where the parent's route at this
+ * `tokens` quantizes the normalized row it is about to consume — an FP8_E4M3FN_ROW_BF16 RowSplit
+ * [14336,5120] parent on its activation-quantized A8 route, which is T >= 5 — the norm is that
+ * route's prologue and the normalized image never reaches memory. On any other parent, `policy` or
+ * token count the Op materializes the normalized row in `workspace` and runs the standalone
+ * projection, producing the arithmetic of rmsnorm() followed by attn_input_proj(). Route selection is
+ * the Op's own choice and is not observable except through `workspace` capacity.
+ *
+ * `residual` is contiguous BF16 [D,T] and `norm_weight` is contiguous BF16 [D,1,1,1] with D equal to
+ * the parent's input rows. The norm uses rsqrtf(sum(x*x)/D + eps) and multiplies each element by
+ * 1 + norm_weight, rounding to BF16 before any activation quantization; eps must be finite and
+ * positive. q/gate and k/v are the projection outputs described by attn_input_proj() for this parent.
+ *
+ * The exact-byte oracle for both branches is rmsnorm() with unit offset into BF16 storage followed by
+ * the standalone projection. `workspace` is sized by
+ * rmsnorm_attn_input_proj_workspace_capacity_bytes() and must not overlap any input, weight, or
+ * output; the Op allocates no device memory of its own and has no persistent state side effect.
+ */
+void rmsnorm_attn_input_proj(const Tensor& residual, const Tensor& norm_weight, float eps,
+                             const Weight& projection_weight, Tensor& q, Tensor& gate, Tensor& k,
+                             Tensor& v, LinearPolicy policy, WorkspaceArena& workspace,
+                             cudaStream_t stream);
+
+/**
  * Applies the A16-only single-parent Q/K/output-gate/V projection without transient workspace.
  */
 void attn_input_proj(const Tensor& x, const Weight& query_key_gate_value_weight, Tensor& q,

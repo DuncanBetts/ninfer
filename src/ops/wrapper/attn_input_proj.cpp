@@ -1,5 +1,7 @@
+#include "core/layout.h"
 #include "core/weight.h"
 #include "ninfer/ops/attn_input_proj.h"
+#include "ninfer/ops/rmsnorm.h"
 
 #include "ops/attn_input_proj/bf16/bf16_attn_input_plan.h"
 #include "ops/attn_input_proj/fp8/fp8_attn_input_plan.h"
@@ -11,6 +13,8 @@
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -260,4 +264,84 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tens
     detail::q8_attn_input_dispatch(x, query_key_value_weight, q, k, v, stream);
 }
 
+namespace {
+
+// The norm folds into the projection's own activation quantizer only where that producer consumes
+// the normalized row directly. Every other parent, policy or token count materializes it.
+bool rmsnorm_folds_into_projection_producer(const Weight& weight, LinearPolicy policy,
+                                            std::int32_t tokens) {
+    return weight.qtype == QType::FP8_E4M3FN_ROW_BF16 &&
+           weight.n == detail::Fp8N14336K5120::kOutputRows &&
+           weight.k == detail::Fp8N14336K5120::kInputRows &&
+           detail::fp8_attn_input_fused_rmsnorm_route(policy, tokens);
+}
+
+std::size_t normalized_image_bytes(std::int32_t rows, std::int32_t tokens) {
+    WorkspaceLayoutBuilder layout;
+    (void)layout.alloc(DType::BF16, {rows, tokens});
+    return layout.peak_bytes(1);
+}
+
+} // namespace
+
+std::size_t
+rmsnorm_attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int32_t parent_rows,
+                                                 std::int32_t input_rows, LinearPolicy policy,
+                                                 std::int32_t min_tokens, std::int32_t max_tokens) {
+    const auto need = [&](std::int32_t tokens) {
+        const std::size_t projection = attn_input_proj_workspace_capacity_bytes(
+            parent_qtype, parent_rows, input_rows, policy, tokens, tokens);
+        const bool folds = parent_qtype == QType::FP8_E4M3FN_ROW_BF16 &&
+                           parent_rows == detail::Fp8N14336K5120::kOutputRows &&
+                           input_rows == detail::Fp8N14336K5120::kInputRows &&
+                           detail::fp8_attn_input_fused_rmsnorm_route(policy, tokens);
+        return folds ? projection
+                     : projection + normalized_image_bytes(input_rows, tokens);
+    };
+    return std::max(need(min_tokens), need(max_tokens));
+}
+
+void rmsnorm_attn_input_proj(const Tensor& residual, const Tensor& norm_weight, float eps,
+                             const Weight& projection_weight, Tensor& q, Tensor& gate, Tensor& k,
+                             Tensor& v, LinearPolicy policy, WorkspaceArena& workspace,
+                             cudaStream_t stream) {
+    const std::int32_t hidden = projection_weight.k;
+    const std::int32_t tokens = residual.ne[1];
+    if (tokens <= 0) {
+        throw std::invalid_argument("rmsnorm_attn_input_proj: T must be positive");
+    }
+    if (!std::isfinite(eps) || eps <= 0.0F) {
+        throw std::invalid_argument("rmsnorm_attn_input_proj: eps must be positive");
+    }
+    if (hidden <= 0) {
+        throw std::invalid_argument("rmsnorm_attn_input_proj: invalid parent input rows");
+    }
+    validate_policy(policy);
+    require_matrix(residual, hidden, tokens, "residual");
+    if (norm_weight.dtype != DType::BF16 || norm_weight.ne[0] != hidden ||
+        norm_weight.ne[1] != 1 || norm_weight.ne[2] != 1 || norm_weight.ne[3] != 1 ||
+        !norm_weight.is_contiguous() || !aligned_to(norm_weight.data, 16)) {
+        throw std::invalid_argument("rmsnorm_attn_input_proj: invalid norm weight");
+    }
+
+    const auto scope = workspace.scope();
+    if (rmsnorm_folds_into_projection_producer(projection_weight, policy, tokens)) {
+        constexpr std::int32_t kQRows  = 6144;
+        constexpr std::int32_t kKvRows = 1024;
+        require_matrix(q, kQRows, tokens, "q");
+        require_matrix(gate, kQRows, tokens, "gate");
+        require_matrix(k, kKvRows, tokens, "k");
+        require_matrix(v, kKvRows, tokens, "v");
+        detail::validate_fp8_weight(projection_weight, "rmsnorm_attn_input_proj");
+        const auto scratch = detail::allocate_fp8_a8_workspace(workspace, tokens, hidden);
+        detail::fp8_attn_input_fused_rmsnorm_launch(residual, norm_weight, eps, projection_weight,
+                                                     q, gate, k, v, scratch, stream);
+        return;
+    }
+
+    Tensor normalized = workspace.alloc(DType::BF16, {hidden, tokens});
+    rmsnorm(residual, norm_weight, eps, true, normalized, stream);
+    dispatch_single_parent(normalized, projection_weight, q, gate, k, v, policy, &workspace,
+                           stream);
+}
 } // namespace ninfer::ops

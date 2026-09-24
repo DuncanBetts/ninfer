@@ -23,6 +23,11 @@ enum class Nvfp4LinearSwiGluRoute {
 };
 
 constexpr std::int32_t kFusedMaxTokens = 128;
+// The A16 kernels are registered only through this token count; above it the A16-only policies
+// have no route at all, and `resolve_route` reports that by throwing. Route *queries* are evaluated
+// per call by the model gate, so they test this cap before consulting the resolver instead of
+// letting "no route" surface as an exception. Plan-time sizing keeps the throwing resolver.
+constexpr std::int32_t kMaxA16Tokens = 16;
 
 Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (tokens <= 0) { throw std::invalid_argument("nvfp4 linear_swiglu: T must be positive"); }
@@ -31,7 +36,7 @@ Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     }
     if (policy == LinearPolicy::A16Only || policy == LinearPolicy::AllowA8) {
         if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
-        if (tokens <= 16) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
+        if (tokens <= kMaxA16Tokens) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
         throw std::invalid_argument("nvfp4 linear_swiglu A16 is registered only through T=16");
     }
     if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
@@ -79,6 +84,14 @@ std::size_t fused_workspace_bytes(std::int32_t tokens) {
 }
 
 } // namespace
+
+bool nvfp4_linear_swiglu_tma_fused_route(LinearPolicy policy, std::int32_t tokens) {
+    if (tokens <= 0 || !valid_linear_policy(policy)) { return false; }
+    // Above the A16 registration cap the A16-only policies have no route at all, which the resolver
+    // reports by throwing; a route query answers false instead.
+    if (!allows_a4(policy) && tokens > kMaxA16Tokens) { return false; }
+    return resolve_route(policy, tokens) == Nvfp4LinearSwiGluRoute::TmaFusedW4A4;
+}
 
 std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
                                                          std::int32_t min_tokens,
