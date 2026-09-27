@@ -189,9 +189,14 @@ ccache --show-stats
 ```
 
 No container tooling is required. Keep `build/` so Ninja can skip unchanged targets; ccache reuses
-compiler outputs when compilation is needed again. Set `CCACHE_DIR` and `CCACHE_MAXSIZE` to override
-ccache's default per-user location and size limit. Statistics are cumulative and exclude work
-skipped by Ninja.
+compiler outputs when compilation is needed again. ccache evicts least-recently-used entries
+automatically once the size limit is reached, so no scheduled cleanup is needed. The 5 GiB default
+limit is too small for a full CUDA build of this size; raise it (e.g. `CCACHE_MAXSIZE=20G`, matching
+the container build) or hot objects will be evicted mid-build. Set `CCACHE_DIR` to override ccache's
+default per-user location. When building from multiple checkouts or worktrees, set
+`CCACHE_BASEDIR` so absolute paths in debug info do not poison cache reuse across directories.
+Statistics are cumulative and exclude work skipped by Ninja. Note that ccache accelerates NVCC
+compilation but not the device-link step, which remains a fixed floor on every rebuild.
 
 The ordinary build above does not require ccache. To disable it in a build directory previously
 configured with these launchers, clear the cached CMake settings:
@@ -219,8 +224,10 @@ ccache for the complementary benefits described above. Missing caches rebuild no
 
 This mainly benefits frequent development rebuilds, not inference speed or runtime memory use.
 Builds sharing the cache on one builder serialize, including different checkouts. The 20 GiB limit
-applies only to ccache; Ninja build directories consume additional disk space until the build cache
-is removed or reclaimed by the builder.
+applies only to ccache and is self-enforcing through least-recently-used eviction. Only the newest
+three configuration build directories are retained automatically; older ones are removed on each
+build, so config iteration cannot grow the cache mount without bound. Mounts idle for over 48 hours
+are additionally reclaimed by the builder's own garbage collection.
 
 The [Dockerfile](Dockerfile) owns source synchronization and configuration invalidation. When
 changing this workflow, run the [build-cache regression check](tests/README.md#container-build-cache)

@@ -24,6 +24,8 @@ COPY . .
 # still rebuild changed inputs. Packages, the Dockerfile and CMake scripts identify
 # the configuration: removed flags and changed defaults must not reuse CMakeCache.txt.
 # Lock the mutable Ninja tree and copy deliverables out of the transient cache mount.
+# Retain only the newest few configuration trees so config iteration cannot grow the
+# cache mount without bound; sharing=locked means no other build is inside them.
 RUN --mount=type=cache,id=ninfer-build,target=/build,sharing=locked \
     --mount=type=cache,target=/ccache \
     export CCACHE_DIR=/ccache CCACHE_MAXSIZE=20G \
@@ -32,6 +34,8 @@ RUN --mount=type=cache,id=ninfer-build,target=/build,sharing=locked \
     && dpkg-query -W >> /build/configuration \
     && LC_ALL=C sort -o /build/configuration /build/configuration \
     && build_dir="/build/$(sha256sum /build/configuration | cut -d ' ' -f 1)" \
+    && mkdir -p "$build_dir" \
+    && ls -dt /build/*/ | grep -v '/src/$' | tail -n +4 | xargs -r rm -rf \
     && rsync --recursive --links --checksum --delete /src/ /build/src/ \
     && cmake -S /build/src -B "$build_dir" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
