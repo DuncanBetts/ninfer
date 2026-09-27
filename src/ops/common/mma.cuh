@@ -56,13 +56,35 @@ __device__ __forceinline__ void mma_s8(int& c0, int& c1, int& c2, int& c3, unsig
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
+// Unit-scale block_scale form of the plain FP8 MMA: every lane passes scale byte 0x7F
+// (E8M0 2^0) with selectors {0,0}, so the instruction computes the same raw e4m3 dot
+// product as kind::f8f6f4 while issuing on the MX datapath. Qualified by
+// ninfer_softmax_attention_test (incl. Fp8E4M3Row256 prompt path) and the FP8 linear
+// oracle suites, plus instruction-level bit-exactness vs the plain form (random inputs
+// with NaN/+-0/subnormal corners).
+// Per-row/per-element scaling still applies post-MMA in FP32 at each call site; the
+// instruction scales only along K and cannot express them.
+// Requires sm_120a; qualified with CUDA 13.1.115.
 __device__ __forceinline__ void mma_fp8_e4m3(float& c0, float& c1, float& c2, float& c3,
                                              unsigned a0, unsigned a1, unsigned a2, unsigned a3,
                                              unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
-                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+    constexpr unsigned kUnitScale8 = 0x7Fu;
+    constexpr unsigned short kScaleBlockId  = 0;
+    constexpr unsigned short kScaleThreadId = 0;
+    asm volatile("mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X."
+                 "m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 "
+                 "{%0,%1,%2,%3}, "
+                 "{%4,%5,%6,%7}, "
+                 "{%8,%9}, "
+                 "{%0,%1,%2,%3}, "
+                 "{%10}, "
+                 "{%11,%12}, "
+                 "{%13}, "
+                 "{%14,%15};\n"
                  : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
-                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(kUnitScale8),
+                   "h"(kScaleBlockId), "h"(kScaleThreadId), "r"(kUnitScale8),
+                   "h"(kScaleBlockId), "h"(kScaleThreadId));
 }
 
 __device__ __forceinline__ void mma_tf32_bits(float& c0, float& c1, float& c2, float& c3,
