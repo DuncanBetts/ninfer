@@ -1,0 +1,2 @@
+corner trial (NaN/+-0/subnormal/Inf): 0/128 differ
+BIT-EXACT over 50 trials (6400 floats)

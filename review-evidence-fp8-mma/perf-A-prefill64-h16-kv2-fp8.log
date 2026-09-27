@@ -1,0 +1,2 @@
+entry=append geometry=d256-h16-kv2   kv=fp8    mapping=identity   execution=eager cache=cold B=1 W=64 contexts=0 valid=64 rows=0 workspace=        0 peak=        0 nodes=0 calls=1 median=    18.432 us min=    16.384 us p95=    18.496 us logical_payload=   302.2 GB/s physical_payload=   184.0 GB/s math=   1.85 TFLOP/s
+  vectors K=258 V=258 bytes cache logical=131072 physical=66048 bytes qk_flops=17039360 pv_flops=17039360 qk_full_op=   0.92 TFLOP/s pv_full_op=   0.92 TFLOP/s unique_kv=66048 bytes unique_cache_rate=     3.6 GB/s

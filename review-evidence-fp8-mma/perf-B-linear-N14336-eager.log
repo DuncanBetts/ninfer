@@ -1,0 +1,7 @@
+# execution=eager graph_calls=1 cuda_runtime=13010
+# actual_gpu=NVIDIA GeForce RTX 5090 sm=120 reference_gpu=RTX_5090
+# dram_spec_gbs=1792.0 sustained_read_gbs=1674.5 cache=cold
+# dense_fp8_tensor_tflops fp16_acc=838.0 fp32_acc=419.0
+# dense_bf16_tensor_tflops fp32_acc=209.5
+label                                           qt pol        N        K      T   median_us      min_us      p95_us   eff_GB/s  DRAM_%  READ_%    TFLOP/s  TC_profile     TC_%     mem_%  T1_lin_x  delta_%
+explicit                                       FP8  A8    14336     5120    128      65.600      65.280      67.680     1195.3   66.70   71.38     286.44  FP8_F32ACC    68.36     66.70         -        -

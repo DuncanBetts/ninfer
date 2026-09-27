@@ -1,0 +1,18 @@
+# B1' (patched, mxf8f6f4 unit-scale) — transcribed verbatim from reviewer-1 session output
+# Conditions: locked 3135 MHz, CUDA 13.1 (nix-shell cudaPackages_13_1.cudatoolkit),
+# tree with change applied, fresh rebuild, graph+cold, warmup 5, repeat 30.
+# Command per line: ./build/bench/ninfer_causal_softmax_attention_bench --entry append
+#   --geometry <geom> --kv-dtype fp8 --batch 1 --tokens 1024 --context 32768
+#   --execution graph --cache cold --warmup 5 --repeat 30
+=== B1p h16-kv2 r1 ===
+entry=append geometry=d256-h16-kv2   kv=fp8    mapping=identity   execution=graph cache=cold B=1 W=1024 contexts=32768 valid=1024 rows=0 workspace=        0 peak=        0 nodes=2 calls=1 median=  3428.384 us min=  3419.136 us p95=  3767.296 us logical_payload= 20363.9 GB/s physical_payload= 10264.2 GB/s math= 162.86 TFLOP/s
+  vectors K=258 V=258 bytes cache logical=69206016 physical=34873344 bytes qk_flops=279177068544 pv_flops=279177068544 qk_full_op=  81.43 TFLOP/s pv_full_op=  81.43 TFLOP/s unique_kv=34873344 bytes unique_cache_rate=    10.2 GB/s
+=== B1p h16-kv2 r2 ===
+entry=append geometry=d256-h16-kv2   kv=fp8    mapping=identity   execution=graph cache=cold B=1 W=1024 contexts=32768 valid=1024 rows=0 workspace=        0 peak=        0 nodes=2 calls=1 median=  3431.584 us min=  3420.160 us p95=  3746.048 us logical_payload= 20344.9 GB/s physical_payload= 10254.7 GB/s math= 162.71 TFLOP/s
+  vectors K=258 V=258 bytes cache logical=69206016 physical=34873344 bytes qk_flops=279177068544 pv_flops=279177068544 qk_full_op=  81.36 TFLOP/s pv_full_op=  81.36 TFLOP/s unique_kv=34873344 bytes unique_cache_rate=    10.2 GB/s
+=== B1p h24-kv4 r1 ===
+entry=append geometry=d256-h24-kv4   kv=fp8    mapping=identity   execution=graph cache=cold B=1 W=1024 contexts=32768 valid=1024 rows=0 workspace=        0 peak=        0 nodes=2 calls=1 median=  5233.760 us min=  5221.376 us p95=  6222.848 us logical_payload= 26677.2 GB/s physical_payload= 13445.6 GB/s math= 160.02 TFLOP/s
+  vectors K=258 V=258 bytes cache logical=138412032 physical=69746688 bytes qk_flops=418765602816 pv_flops=418765602816 qk_full_op=  80.01 TFLOP/s pv_full_op=  80.01 TFLOP/s unique_kv=69746688 bytes unique_cache_rate=    13.3 GB/s
+=== B1p h24-kv4 r2 ===
+entry=append geometry=d256-h24-kv4   kv=fp8    mapping=identity   execution=graph cache=cold B=1 W=1024 contexts=32768 valid=1024 rows=0 workspace=        0 peak=        0 nodes=2 calls=1 median=  5237.792 us min=  5223.392 us p95=  6477.856 us logical_payload= 26656.7 GB/s physical_payload= 13435.2 GB/s math= 159.90 TFLOP/s
+  vectors K=258 V=258 bytes cache logical=138412032 physical=69746688 bytes qk_flops=418765602816 pv_flops=418765602816 qk_full_op=  79.95 TFLOP/s pv_full_op=  79.95 TFLOP/s unique_kv=69746688 bytes unique_cache_rate=    13.3 GB/s

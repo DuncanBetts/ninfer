@@ -1,0 +1,6 @@
+nvfp4-g16 quantized-vs-bf16 oracle quality mae=0.0053698 rmse=0.00664472 rel_rmse=0.0956876 max_abs=0.0218758
+k8v4 quantized-vs-bf16 oracle quality mae=0.00537442 rmse=0.0067174 rel_rmse=0.0965647 max_abs=0.0243407
+PASS causal_softmax_attention public-contract correctness
+packed_softmax_attention: PASS
+context_softmax_attention: PASS
+softmax_attention: PASS
