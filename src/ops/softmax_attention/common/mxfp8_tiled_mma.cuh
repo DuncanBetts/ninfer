@@ -20,6 +20,10 @@ struct Fp8KvTiledKeys {
     using Scale      = __half;  // staged software scale word, one per key
     using CacheScale = __half;  // cache K scale plane element
 
+    // The cache plane already holds the staged E4M3 operand, so a copy lands the MMA input
+    // directly and no raw K arena is reserved.
+    static constexpr int kRawKeyBytes = 0;
+
     // Elements [16*group, 16*group + 16) of one key row, addressed by (page, page_offset).
     template <class Geometry>
     __device__ __forceinline__ static void
@@ -57,7 +61,6 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
     constexpr int D             = 256;
     constexpr int Br            = Schedule::kQueryRows;
     constexpr int Bc            = Schedule::kKeyRows;
-    constexpr int DB16          = 128;
     constexpr int QKKs          = D / 32;
     constexpr int QKNt          = Bc / 8;
     constexpr int PVNtPerWarp   = D / 8;
@@ -78,6 +81,13 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
     __half* k_scale_s =
         reinterpret_cast<__half*>(reinterpret_cast<unsigned char*>(v_f16) + Schedule::kVStageBytes);
     auto* v_scale_s = reinterpret_cast<typename Values::Scale*>(k_scale_s + Bc);
+    // A K policy that stages raw cache bytes owns the arena behind the Schedule's regions and
+    // decodes it into k_fp8 once the tile's copies land; the direct policies leave it unused.
+    constexpr int kRawStageBytes = Keys::kRawKeyBytes * Bc;
+    static_assert(kRawStageBytes % 16 == 0, "the raw K arena must stay 16-byte aligned");
+    static_assert(Schedule::kSharedBytes % 16 == 0, "the raw K arena must start 16-byte aligned");
+    [[maybe_unused]] std::uint8_t* k_raw =
+        reinterpret_cast<std::uint8_t*>(smem_raw + Schedule::kSharedBytes);
 
     const int q_block = static_cast<int>(blockIdx.x);
     const int q_head  = static_cast<int>(blockIdx.y);
@@ -176,26 +186,39 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
     auto issue_kv_codes = [&](int tile_k0, int cooperative_tid, int cooperative_threads) {
         const int physical_page = block_table[tile_k0 >> kPagedKVPageShift];
         const int page_offset0  = tile_k0 & (kPagedKVPageSize - 1);
+        // A raw-staging policy carries its own copy map and decodes the tile afterwards; the
+        // direct policies stage the operand here, together with the V codes when V shares the
+        // K granule layout.
+        static_assert(Keys::kRawKeyBytes == 0 || Values::kCodeBytes != D,
+                      "a raw-staging K policy cannot reuse the direct V code loop");
+        if constexpr (Keys::kRawKeyBytes == 0) {
 #pragma unroll 1
-        for (int chunk = cooperative_tid; chunk < Bc * (D / 16); chunk += cooperative_threads) {
-            const int key_l  = chunk / (D / 16);
-            const int dc     = chunk - key_l * (D / 16);
-            const int d      = dc * 16;
-            const int key    = tile_k0 + key_l;
-            std::uint8_t* kd = &k_fp8[(key_l * DB16 + causal_swizzle(key_l, dc * 8)) * 2];
-            if (key <= max_query_abs) {
-                Keys::template stage_group<Geometry>(kd, cache_k, cache_k_scale, physical_page,
-                                                     kv_head, page_offset0 + key_l, dc);
-                if constexpr (Values::kCodeBytes == D)
-                    cp_async<16, Cache::cg>(
-                        &v_codes[key_l * D + d],
-                        cache_v + paged_kv_element_offset<Values::kCodeBytes, Geometry::KVHeads>(
-                                       physical_page, kv_head, page_offset0 + key_l, d));
-            } else {
-                store_vec(kd, make_int4(0, 0, 0, 0));
-                if constexpr (Values::kCodeBytes == D)
-                    store_vec(&v_codes[key_l * D + d], make_int4(0, 0, 0, 0));
+            for (int chunk = cooperative_tid; chunk < Bc * (D / 16);
+                 chunk += cooperative_threads) {
+                const int key_l  = chunk / (D / 16);
+                const int dc     = chunk - key_l * (D / 16);
+                const int d      = dc * 16;
+                const int key    = tile_k0 + key_l;
+                std::uint8_t* kd = causal_k_granule(k_fp8, key_l, dc);
+                if (key <= max_query_abs) {
+                    Keys::template stage_group<Geometry>(kd, cache_k, cache_k_scale, physical_page,
+                                                         kv_head, page_offset0 + key_l, dc);
+                    if constexpr (Values::kCodeBytes == D)
+                        cp_async<16, Cache::cg>(
+                            &v_codes[key_l * D + d],
+                            cache_v +
+                                paged_kv_element_offset<Values::kCodeBytes, Geometry::KVHeads>(
+                                    physical_page, kv_head, page_offset0 + key_l, d));
+                } else {
+                    store_vec(kd, make_int4(0, 0, 0, 0));
+                    if constexpr (Values::kCodeBytes == D)
+                        store_vec(&v_codes[key_l * D + d], make_int4(0, 0, 0, 0));
+                }
             }
+        } else {
+            Keys::template stage_tile<Geometry>(k_raw, cache_k, cache_k_scale, physical_page,
+                                               kv_head, page_offset0, tile_k0, max_query_abs, Bc,
+                                               cooperative_tid, cooperative_threads);
         }
         if constexpr (Values::kCodeBytes != D) {
 #pragma unroll 1
@@ -223,6 +246,12 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
 
     if (key_blocks > 0) issue_kv_tile(first_owned_tile * Bc, tid, Schedule::kThreads);
     ninfer::ops::cp_wait<0>();
+    if constexpr (Keys::kRawKeyBytes != 0) {
+        // The raw bytes of a group are copied and decoded by the same thread, so the wait
+        // above already orders the decode; the barrier publishes it for the first QK.
+        if (key_blocks > 0)
+            Keys::decode_tile(k_fp8, k_raw, Bc, tid, Schedule::kThreads);
+    }
     __syncthreads();
 
     float acc[PVNtPerWarp][4]{};
@@ -437,6 +466,12 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
         }
 
         if (kb + 1 < key_blocks) ninfer::ops::cp_wait<0>();
+        if constexpr (Keys::kRawKeyBytes != 0) {
+            // QK for this tile is behind the barrier that follows issue_kv_tile, so the next
+            // tile can be decoded here; the trailing barrier publishes it before its QK.
+            if (kb + 1 < key_blocks)
+                Keys::decode_tile(k_fp8, k_raw, Bc, tid, Schedule::kThreads);
+        }
         __syncthreads();
     };
     const int full_blocks =

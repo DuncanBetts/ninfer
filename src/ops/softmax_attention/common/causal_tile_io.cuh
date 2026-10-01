@@ -37,6 +37,14 @@ __device__ __forceinline__ int causal_swizzle(int row, int col) {
     return (((col >> 3) ^ (row & 7)) << 3) | (col & 7);
 }
 
+// One 16-byte E4M3 staging granule of the 256 B/key K operand: chunk `chunk` covers elements
+// [16*chunk, 16*chunk + 16) of row `key_l`, swizzled inside the 128-byte half-row. Both the
+// direct copy and the shared-memory decode of a K policy must land the operand here.
+__device__ __forceinline__ std::uint8_t* causal_k_granule(std::uint8_t* k_e4m3, int key_l,
+                                                          int chunk) {
+    return &k_e4m3[(key_l * (kCausalHeadDim / 2) + causal_swizzle(key_l, chunk * 8)) * 2];
+}
+
 __device__ __forceinline__ unsigned causal_swizzle_address(unsigned base, unsigned column,
                                                            unsigned matrix, unsigned row) {
     return base + ((column | matrix) ^ row);

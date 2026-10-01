@@ -16,13 +16,16 @@ void launch_mxfp8_kv_tiled_mma(const CausalAttentionOperands& p, View cache,
         partition.capacity != partition.active(p.visible_capacity) || !partial.acc ||
         !partial.maximum || !partial.sum)
         throw std::invalid_argument("MXFP8 tiled attention: invalid batch or partial storage");
+    // A raw-staging K policy keeps its cache-byte arena behind the Schedule's regions.
+    constexpr int kSharedBytes = S::kSharedBytes + Keys::kRawKeyBytes * S::kKeyRows;
+    static_assert(kSharedBytes <= 99 * 1024, "MXFP8 tiled attention exceeds the shared budget");
     const auto invoke = [&]<class Metadata>(Metadata metadata) {
         constexpr auto kernel    = mxfp8_kv_tiled_mma_kernel<G, S, Values, Keys, Metadata>;
         static const auto status = cudaFuncSetAttribute(
-            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, S::kSharedBytes);
+            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSharedBytes);
         CUDA_CHECK(status);
         const dim3 grid(div_up(p.width, S::kQueryRows), G::QHeads, partition.capacity);
-        kernel<<<grid, S::kThreads, S::kSharedBytes, stream>>>(
+        kernel<<<grid, S::kThreads, kSharedBytes, stream>>>(
             p.q, cache.keys, cache.values, cache.key_scales, cache.value_scales, metadata,
             p.positions, p.scale, p.width, partition, partial);
         CUDA_CHECK(cudaGetLastError());
