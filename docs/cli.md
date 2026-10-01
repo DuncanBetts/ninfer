@@ -203,6 +203,12 @@ block length eight, while fifteen uses the maximum supported block length sixtee
 ## Common options
 
 The table lists executable defaults. The examples above select FP8 KV and MTP3.
+`nvfp4` and `nvfp4-fp8` store the identical NVFP4-G16 cache; `nvfp4` runs the attention QK
+product on FP16-expanded K, while `nvfp4-fp8` folds each group scale into an E4M3 K operand and
+uses the 8-bit E4M3 QK MMA. The E4M3-QK operand path is what the tiled single-request prefill
+path uses (query width above 192); batched windows and widths of 192 or less (decode, MTP/DFlash
+verification) keep the existing NVFP4 FP16 kernels over the identical storage, so their numerics
+and speed are unchanged from `nvfp4`.
 
 | Option | Meaning | Default |
 |---|---|---:|
@@ -211,7 +217,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
-| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|nvfp4-fp8\|k8v4` | KV-cache storage and compute profile | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |

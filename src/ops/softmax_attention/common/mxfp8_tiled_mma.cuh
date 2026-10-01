@@ -10,13 +10,47 @@
 
 namespace ninfer::ops::detail {
 
+// K source of the shared MXFP8 producer. Values selects the stored V representation; Keys
+// selects where the E4M3 K operand comes from. Both staged planes are fixed by the Schedule:
+// K always lands as 256 bytes/key of swizzled E4M3, so a policy only describes how one
+// 16-element group of one key becomes those 16 bytes, and which per-key word multiplies the
+// FP32 scores after the MMA. The default is the fp8 row-256 cache: the codes are already the
+// staged word and the cache carries the row scale.
+struct Fp8KvTiledKeys {
+    using Scale      = __half;  // staged software scale word, one per key
+    using CacheScale = __half;  // cache K scale plane element
+
+    // Elements [16*group, 16*group + 16) of one key row, addressed by (page, page_offset).
+    template <class Geometry>
+    __device__ __forceinline__ static void
+    stage_group(std::uint8_t* dst, const std::uint8_t* cache_k, const CacheScale*,
+                std::int32_t physical_page, std::int32_t kv_head, std::int32_t page_offset,
+                int group) {
+        const std::int64_t offset =
+            kv_cache_fp8_code_index<Geometry>(physical_page, kv_head, group * 16, page_offset);
+        cp_async<16, Cache::cg>(dst, cache_k + offset);
+    }
+
+    template <class Geometry>
+    __device__ __forceinline__ static Scale key_scale(const CacheScale* cache_k_scale,
+                                                      std::int32_t physical_page,
+                                                      std::int32_t kv_head,
+                                                      std::int32_t page_offset) {
+        return cache_k_scale[kv_cache_fp8_scale_index<Geometry>(physical_page, kv_head,
+                                                                page_offset)];
+    }
+
+    // Key columns outside the visible range are zeroed; their scale must not resurrect them.
+    __device__ __forceinline__ static Scale invisible_key_scale() { return __float2half_rn(0.0F); }
+};
+
 // Each warp retains 16 query rows through MXFP8 QK, softmax, and FP16 PV.
-// Values selects the stored V representation; split outputs remain FP32 with
-// maxima in natural scaled-score units for the final merge.
-template <class Geometry, class Schedule, class Values, class Metadata>
+// Split outputs remain FP32 with maxima in natural scaled-score units for the final merge.
+template <class Geometry, class Schedule, class Values, class Keys, class Metadata>
 __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
     const __nv_bfloat16* __restrict__ q, const std::uint8_t* __restrict__ cache_k,
-    const std::uint8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
+    const std::uint8_t* __restrict__ cache_v,
+    const typename Keys::CacheScale* __restrict__ cache_k_scale,
     const typename Values::Scale* __restrict__ cache_v_scale, Metadata metadata,
     const std::int32_t* __restrict__ positions, float scale, std::int32_t width,
     CausalKvPartition partition, CausalPartialView partial) {
@@ -31,6 +65,8 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
     constexpr unsigned FullMask = 0xffffffffU;
     static_assert(QKKs == 8);
     static_assert(PVNtPerWarp == 32);
+    static_assert(std::is_same_v<typename Keys::Scale, __half>,
+                  "Schedule::kScaleBytes reserves one FP16 K scale word per key");
 
     extern __shared__ __align__(16) unsigned char smem_raw[];
     std::uint8_t* q_fp8 = reinterpret_cast<std::uint8_t*>(smem_raw);
@@ -116,11 +152,11 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
         for (int key_l = cooperative_tid; key_l < Bc; key_l += cooperative_threads) {
             const int key = tile_k0 + key_l;
             if (key <= max_query_abs) {
-                const std::int64_t off = kv_cache_fp8_scale_index<Geometry>(physical_page, kv_head,
-                                                                                  page_offset0 + key_l);
-                k_scale_s[key_l]       = cache_k_scale[off];
+                k_scale_s[key_l] = Keys::template key_scale<Geometry>(
+                    cache_k_scale, physical_page, kv_head, page_offset0 + key_l);
                 if constexpr (Values::kScaleItems == 1) {
-                    v_scale_s[key_l] = cache_v_scale[off];
+                    v_scale_s[key_l] = cache_v_scale[kv_cache_fp8_scale_index<Geometry>(
+                        physical_page, kv_head, page_offset0 + key_l)];
                 } else {
                     const auto v_off =
                         paged_kv_element_offset<Values::kScaleItems, Geometry::KVHeads>(
@@ -128,7 +164,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
                     cp_async<16>(v_scale_s + key_l * Values::kScaleItems, cache_v_scale + v_off);
                 }
             } else {
-                k_scale_s[key_l] = __float2half_rn(0.0F);
+                k_scale_s[key_l] = Keys::invisible_key_scale();
                 if constexpr (Values::kScaleItems == 1)
                     v_scale_s[key_l] = __float2half_rn(0.0F);
                 else
@@ -148,11 +184,13 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void mxfp8_kv_tiled_mma_kernel(
             const int key    = tile_k0 + key_l;
             std::uint8_t* kd = &k_fp8[(key_l * DB16 + causal_swizzle(key_l, dc * 8)) * 2];
             if (key <= max_query_abs) {
-                const std::int64_t off = kv_cache_fp8_code_index<Geometry>(physical_page, kv_head,
-                                                                           d, page_offset0 + key_l);
-                cp_async<16, Cache::cg>(kd, &cache_k[off]);
+                Keys::template stage_group<Geometry>(kd, cache_k, cache_k_scale, physical_page,
+                                                     kv_head, page_offset0 + key_l, dc);
                 if constexpr (Values::kCodeBytes == D)
-                    cp_async<16, Cache::cg>(&v_codes[key_l * D + d], &cache_v[off]);
+                    cp_async<16, Cache::cg>(
+                        &v_codes[key_l * D + d],
+                        cache_v + paged_kv_element_offset<Values::kCodeBytes, Geometry::KVHeads>(
+                                       physical_page, kv_head, page_offset0 + key_l, d));
             } else {
                 store_vec(kd, make_int4(0, 0, 0, 0));
                 if constexpr (Values::kCodeBytes == D)

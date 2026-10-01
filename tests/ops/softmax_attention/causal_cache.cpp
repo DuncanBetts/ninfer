@@ -74,6 +74,20 @@ constexpr ReductionCriterion kAttentionK8V4Criterion{
     /*gross_relative_to_max_reference*/ 1.1e-1,
 };
 
+// NVFP4-G16 storage whose E4M3 QK operand already carries the group scale. The stored value is
+// the E2M1 * E4M3(scale) product, which needs up to five significand bits, so expressing it in
+// E4M3 rounds once at at most 2^-4 relative per K element. That round is the entire difference
+// from the fp8-K row profile, whose stored codes ARE the operand: on the widest RMS-1.8 fixture
+// (T=1024 over 9216 keys) this route measures rel_l2 0.086-0.094 against 0.058 for fp8-K, and
+// max_abs 0.092 against 0.056. The E4M3 subnormal floor and the 448 saturation are tail effects
+// around that round. Budgets below carry ~25% headroom over the measurement; they still reject a
+// broken route (an unqualified operand path measures rel_l2 ~1).
+constexpr ReductionCriterion kAttentionNvfp4Fp8QkCriterion{
+    /*relative_l2*/ 1.25e-1,
+    /*gross_absolute*/ 5.0e-3,
+    /*gross_relative_to_max_reference*/ 1.75e-1,
+};
+
 struct TestVectorLayout {
     DType code_dtype;
     std::int32_t code_extent;
@@ -97,6 +111,7 @@ TestCacheLayout test_cache_layout(KvCacheStorage storage) {
         return {{DType::FP8_E4M3FN, kHeadDim, DType::FP16, kFp8QuantGroups},
                 {DType::FP8_E4M3FN, kHeadDim, DType::FP16, kFp8QuantGroups}};
     case KvCacheStorage::Nvfp4Group16:
+    case KvCacheStorage::Nvfp4Group16Fp8Qk:
         return {{DType::U8, kNvfp4CodeBytes, DType::U8, kNvfp4QuantGroups},
                 {DType::U8, kNvfp4CodeBytes, DType::U8, kNvfp4QuantGroups}};
     case KvCacheStorage::Fp8KeyNvfp4Value:
@@ -662,7 +677,8 @@ HostCache make_cache(const Geometry& geometry, KvCacheStorage storage, std::int3
         return cache;
     }
 
-    if (storage == KvCacheStorage::Nvfp4Group16) {
+    if (storage == KvCacheStorage::Nvfp4Group16 ||
+        storage == KvCacheStorage::Nvfp4Group16Fp8Qk) {
         const std::size_t code_elements =
             static_cast<std::size_t>(kNvfp4CodeBytes) * logical_capacity * geometry.kv_heads;
         const std::size_t scale_elements =
@@ -783,7 +799,8 @@ void append_cache(HostCache& cache, const std::vector<float>& k, const std::vect
             const std::size_t source = kv_input_index(geometry, head, 0, token);
             const std::size_t target =
                 cache_index(geometry, cache.logical_capacity, head, position, 0);
-            if (cache.storage == KvCacheStorage::Nvfp4Group16) {
+            if (cache.storage == KvCacheStorage::Nvfp4Group16 ||
+                cache.storage == KvCacheStorage::Nvfp4Group16Fp8Qk) {
                 const std::size_t code = logical_plane_index(
                     kNvfp4CodeBytes, geometry, cache.logical_capacity, head, position, 0);
                 const std::size_t scale = logical_plane_index(
@@ -866,6 +883,7 @@ std::vector<double> ideal_attention(const std::vector<float>& q, const HostCache
     const int tokens = positions.size(), visible = positions.back() + 1;
     const bool rotate_q = cache.storage != KvCacheStorage::BFloat16;
     const bool rotate_v = cache.storage == KvCacheStorage::Nvfp4Group16 ||
+                          cache.storage == KvCacheStorage::Nvfp4Group16Fp8Qk ||
                           cache.storage == KvCacheStorage::Fp8KeyNvfp4Value;
     std::vector<double> query(q.begin(), q.end()), output(q.size());
     if (rotate_q)
@@ -1676,6 +1694,8 @@ const char* cache_name(KvCacheStorage storage) {
         return "fp8-e4m3fn-row256";
     case KvCacheStorage::Nvfp4Group16:
         return "nvfp4-g16";
+    case KvCacheStorage::Nvfp4Group16Fp8Qk:
+        return "nvfp4-g16-fp8-qk";
     case KvCacheStorage::Fp8KeyNvfp4Value:
         return "k8v4";
     }
@@ -1688,6 +1708,9 @@ ReductionCriterion attention_criterion(KvCacheStorage storage) {
     if (storage == KvCacheStorage::Fp8E4M3Row256) return kAttentionFp8Criterion;
     if (storage == KvCacheStorage::Nvfp4Group16) return kAttentionNvfp4Criterion;
     if (storage == KvCacheStorage::Fp8KeyNvfp4Value) return kAttentionK8V4Criterion;
+    // The NVFP4-G16/E4M3-QK route consumes 8-bit E4M3 QK operands of the same class as the
+    // fp8-K row profile, plus the one extra K round documented at the criterion.
+    if (storage == KvCacheStorage::Nvfp4Group16Fp8Qk) return kAttentionNvfp4Fp8QkCriterion;
     throw std::logic_error("unregistered causal-attention test storage");
 }
 
@@ -1870,7 +1893,8 @@ int run_a1_case(DeviceExecutionView execution, const Geometry& geometry, KvCache
                                         output_bits, kHeadDim * geometry.q_heads, oracle_queries)),
                                     reference, attention_criterion(storage));
     failures += verify_cache(label, cache.snapshot(), expected);
-    if (storage == KvCacheStorage::Nvfp4Group16 || storage == KvCacheStorage::Fp8KeyNvfp4Value) {
+    if (storage == KvCacheStorage::Nvfp4Group16 || storage == KvCacheStorage::Fp8KeyNvfp4Value ||
+        storage == KvCacheStorage::Nvfp4Group16Fp8Qk) {
         DeviceCache standalone(initial, mapping, max_context);
         ops::kv_cache_append(tk, tv, tp, standalone.view(), nullptr);
         cuda_synchronize();
@@ -2549,6 +2573,49 @@ int run_nvfp4_cases(DeviceExecutionView execution) {
     return failures;
 }
 
+// The E4M3-QK route replaces the QK operand for single-request widths above the shared NVFP4
+// plan's grouped threshold, so the cases straddle that boundary and reach prefill width. Small
+// widths keep the storage-compatible NVFP4 families and are covered as contract, not as the new
+// operand path.
+int run_nvfp4_fp8_cases(DeviceExecutionView execution) {
+    constexpr KvCacheStorage storage = KvCacheStorage::Nvfp4Group16Fp8Qk;
+    const std::array<int, 4> prefill_queries{0, 63, 128, 1023};
+    // Queries stay inside the case's own token count: the oracle is evaluated per query row.
+    const std::array<int, 4> short_prefill_queries{0, 63, 128, 256};
+    int failures = 0;
+    for (const Geometry& geometry : kGeometries) {
+        failures += run_a1_case(execution, geometry, storage, {1, 0, 1, 901u},
+                                MappingPattern::Identity);
+        failures += run_a1_case(execution, geometry, storage, {64, 61, 192, 902u},
+                                MappingPattern::Fragmented);
+        failures += run_a1_case(execution, geometry, storage, {192, 64, 256, 903u},
+                                MappingPattern::Offset);
+        failures += run_a1_case(execution, geometry, storage, {193, 64, 257, 904u},
+                                MappingPattern::Fragmented);
+        failures += run_a1_case(execution, geometry, storage, {1024, 8192, 9216, 905u},
+                                MappingPattern::Fragmented, prefill_queries);
+        failures += run_a3_case(execution, geometry, storage, {193, 64, 257, 906u},
+                                MappingPattern::Fragmented);
+        failures += run_a3_case(execution, geometry, storage, {1024, 8192, 9216, 907u},
+                                MappingPattern::Fragmented, prefill_queries);
+        failures += run_a3_case(execution, geometry, storage, {1, 2048, 2049, 908u},
+                                MappingPattern::Fragmented);
+    }
+    // Clamped group scales: at this amplitude the NVFP4 G16 scale reaches its 2^-9 floor and some
+    // products fall to 2^-10, the E4M3 subnormal tie that the operand rounding sends to zero.
+    failures += run_a1_case(execution, kGeometries[0], storage,
+                            {193, 64, 257, 909u, false, false, 0x1p-8f}, MappingPattern::Identity);
+    failures += run_a1_case(execution, kGeometries[0], storage, {193, 64, 257, 910u, false, true},
+                            MappingPattern::Fragmented);
+    failures += run_a1_case(execution, kGeometries[1], storage, {7, 17, 24, 911u},
+                            MappingPattern::Identity);
+    failures += run_a3_case(execution, kGeometries[1], storage, {257, 8191, 8448, 912u},
+                            MappingPattern::Fragmented, short_prefill_queries);
+    failures += run_a3_case(execution, kGeometries[1], storage, {1, 16383, 16384, 913u},
+                            MappingPattern::Fragmented);
+    return failures;
+}
+
 int run_k8v4_cases(DeviceExecutionView execution) {
     int failures = 0;
     for (const Geometry& geometry : kGeometries) {
@@ -2724,6 +2791,10 @@ int run_storage_cases(DeviceExecutionView execution, KvCacheStorage storage) {
         failures += run_k8v4_cases(execution);
         failures += run_quantized_batch_cases(execution, storage, 815u);
         failures += report_quantization_quality(storage, 819u);
+    } else if (storage == KvCacheStorage::Nvfp4Group16Fp8Qk) {
+        failures += run_nvfp4_fp8_cases(execution);
+        failures += run_quantized_batch_cases(execution, storage, 915u);
+        failures += report_quantization_quality(storage, 919u);
     }
     if (storage == KvCacheStorage::BFloat16 || storage == KvCacheStorage::Int8Group64)
         for (const auto& geometry : kGeometries)
@@ -2760,7 +2831,8 @@ int run_softmax_attention_causal_cache_tests(std::optional<KvCacheStorage> selec
     int failures         = 0;
     for (const auto storage :
          {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
-          KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+          KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value,
+          KvCacheStorage::Nvfp4Group16Fp8Qk}) {
         if (selected && storage != *selected) continue;
         const auto start = std::chrono::steady_clock::now();
         std::cout << "RUN causal_softmax_attention " << cache_name(storage) << std::endl;

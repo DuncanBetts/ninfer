@@ -13,6 +13,8 @@
 #include "ops/softmax_attention/dense/causal_cache/nvfp4/launch.h"
 #include "ops/softmax_attention/dense/causal_cache/k8v4/plan.h"
 #include "ops/softmax_attention/dense/causal_cache/k8v4/launch.h"
+#include "ops/softmax_attention/dense/causal_cache/nvfp4_fp8/plan.h"
+#include "ops/softmax_attention/dense/causal_cache/nvfp4_fp8/launch.h"
 
 #include <algorithm>
 #include <cmath>
@@ -296,6 +298,10 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         return detail::nvfp4_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
                                                 execution.multiprocessor_count);
 
+    if (cache_storage == KvCacheStorage::Nvfp4Group16Fp8Qk)
+        return detail::nvfp4_fp8_kv_workspace_bytes(q_heads, batch_size, min_width, max_width,
+                                                    envelope, execution.multiprocessor_count);
+
     return detail::k8v4_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
                                            execution.multiprocessor_count);
 }
@@ -347,6 +353,17 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         return;
     }
 
+    if (cache.storage == KvCacheStorage::Nvfp4Group16Fp8Qk) {
+        // E4M3-QK operand route. The profile shares the NVFP4 families, so only the tiled
+        // family replaces the QK operand: single-request widths above 192 run the mxfp8 E4M3
+        // producer, while batched windows and widths of 192 or less (decode, MTP/DFlash
+        // verification) run the NVFP4 FP16 kernels over the identical storage. See
+        // nvfp4_fp8/plan.cpp for the family boundary and nvfp4_fp8/launch.cu for the split.
+        detail::nvfp4_fp8_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows,
+                                              scale, cache, envelope, workspace, out, execution);
+        return;
+    }
+
     detail::k8v4_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
                                      envelope, workspace, out, execution);
 }
@@ -384,6 +401,13 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
     if (cache.storage == KvCacheStorage::Nvfp4Group16) {
         detail::nvfp4_kv_cached_attention(q, positions, scale, cache, envelope, workspace, out,
                                           execution);
+        return;
+    }
+
+    if (cache.storage == KvCacheStorage::Nvfp4Group16Fp8Qk) {
+        // Same family split as the append route above: E4M3 QK only in the tiled regime.
+        detail::nvfp4_fp8_kv_cached_attention(q, positions, scale, cache, envelope, workspace, out,
+                                              execution);
         return;
     }
 

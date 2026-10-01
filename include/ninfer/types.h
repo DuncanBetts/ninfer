@@ -33,6 +33,11 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8E4M3Row256,
     Nvfp4Group16,
     Fp8KeyNvfp4Value,
+    // Same NVFP4-G16 storage as Nvfp4Group16 with the QK product on the E4M3 MMA: K is decoded
+    // to `E2M1(code) * E4M3(G16 scale)` expressed as an E4M3 operand, so the software K column
+    // scale is unit. Appended after the existing members so the packed capture/shortlist
+    // identity tag keeps every established value.
+    Nvfp4Group16Fp8Qk,
 };
 
 enum class EnginePurpose : std::uint8_t {

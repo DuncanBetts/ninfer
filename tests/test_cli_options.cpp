@@ -84,6 +84,10 @@ int main() {
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "k8v4"});
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
+    const ninfer::cli::Options nvfp4_fp8 =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", "nvfp4-fp8"});
+    failures += check(nvfp4_fp8.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16Fp8Qk,
+                      "--kv-dtype nvfp4-fp8 did not select the E4M3-QK NVFP4 KV route");
     const std::string help = ninfer::cli::usage_text("ninfer-cli");
     failures +=
         check(help.find("nvfp4") != std::string::npos && help.find("k8v4") != std::string::npos,

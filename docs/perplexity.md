@@ -20,7 +20,10 @@ English reference text, English long-form text, Chinese reference text, and NInf
 
 The default evaluation uses a 4,096-token context and a 2,048-token stride. Use `--context` and
 `--stride` to change that protocol, or score one UTF-8 file with `--text FILE`. The available Main
-KV representations are `bf16`, `int8`, `fp8`, `nvfp4`, and `k8v4`.
+KV representations are `bf16`, `int8`, `fp8`, `nvfp4`, `nvfp4-fp8`, and `k8v4`. `nvfp4` and
+`nvfp4-fp8` store identical NVFP4-G16 bytes but differ in attention math: `nvfp4` expands K to
+FP16 for a 16-bit QK product, while `nvfp4-fp8` decodes K to an E4M3 operand carrying its group
+scale and runs the 8-bit E4M3 QK MMA.
 
 ```bash
 ./build/apps/ninfer-perplexity models/qwen3_8_27b.ninfer \

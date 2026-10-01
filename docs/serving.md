@@ -750,6 +750,11 @@ curl http://127.0.0.1:8080/v1/models \
 ## Server options
 
 The table lists executable defaults. The startup example selects a long-context FP8/MTP3 profile.
+`nvfp4` and `nvfp4-fp8` store the identical NVFP4-G16 cache; `nvfp4` runs the attention QK
+product on FP16-expanded K, while `nvfp4-fp8` folds each group scale into an E4M3 K operand and
+uses the 8-bit E4M3 QK MMA. That operand path serves the tiled single-request prefill widths
+(above 192); batched windows and widths of 192 or less (decode, MTP/DFlash verification) keep the
+existing NVFP4 FP16 kernels over the identical storage.
 
 | Option | Meaning | Default |
 |---|---|---:|
@@ -774,7 +779,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
-| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|nvfp4-fp8\|k8v4` | KV-cache storage and compute profile | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |

@@ -79,10 +79,21 @@ Speculative backends 在一个 Engine 内互斥，因此当前最多有两个 gr
 | MTP | MTP persistent K/V 与其 code/scale planes | MTP KV frontier |
 | Draft Full | selected draft 的 full-context K/V | draft context frontier |
 
-Main Text 与 MTP 使用 Engine 选择的 BF16、INT8-G64、FP8-E4M3FN-row256、NVFP4-G16 或 K8V4
+Main Text 与 MTP 使用 Engine 选择的 BF16、INT8-G64、FP8-E4M3FN-row256、NVFP4-G16、
+NVFP4-G16-FP8QK 或 K8V4
 KV profile；Draft Full 使用自己的 BF16 profile。`BFloat16` 名称下的物理 layout 为 BF16 K、FP16 V，
 写入端将 BF16 V 一次转换为 FP16。K8V4 是封闭的非对称 profile，不是运行时 bit-width 组合：K 固定为
 FP8-E4M3FN-row256，V 固定为 NVFP4-G16。
+
+NVFP4-G16 与 NVFP4-G16-FP8QK 使用完全相同的物理 layout（288 B/token/head），两者不是运行时开关，
+而是同一 storage 下的两个 closed compute profile：`nvfp4` 把 K 展开为 FP16 并用 16-bit QK MMA；
+`nvfp4-fp8` 在 staging 时把 per-16 E4M3 group scale 折进值中，把每个值重新表示为 E4M3 operand
+（`E2M1(code) × E4M3(scale)` 的 E4M3 image），QK 走 block-scaled 8-bit `e4m3 × e4m3` MMA
+（`mxf8f6f4`，`m16n8k32`），因此 software K column scale 恒为 1。Q 两侧都已是 E4M3 tile。
+
+`NVFP4-G16-FP8QK` 只在 single-request 且 query width > 192 的 tiled prefill 路径上替换 QK
+operand；batched window 与 width ≤ 192（decode、MTP/DFlash verification）继续使用既有的 NVFP4 FP16
+kernels，读取同一份 storage，因此它们的数值与速度与 `nvfp4` 相同。
 
 `PagedKVStorageLayout` 将选定的 closed profile 解析为 K/V data/scale plane schema；target planner 按
 layer 展开该 schema 并确定 plane ordinal。Common pool implementation 仍只接收已展开的
@@ -243,7 +254,8 @@ DFlash Full 使用 head-major page run：
 - \(X=D\) 表示 K/V 或 quantized code plane；
 - INT8-G64 scale plane 使用 \(X=D/64\)；
 - FP8-E4M3FN-row256 scale plane 使用 \(X=1\)；
-- NVFP4-G16 code plane 使用 packed U8 \(X=D/2\)，scale plane 使用 U8 \(X=D/16\)；
+- NVFP4-G16 code plane 使用 packed U8 \(X=D/2\)，scale plane 使用 U8 \(X=D/16\)；NVFP4-G16-FP8QK
+  使用同一组 plane（K/V 都不变，只有 QK 算术不同）；
 - \(H\) 是 KV heads；
 - \(N_{physical}\) 是该 pool 的 physical page count。
 
@@ -277,7 +289,7 @@ D256 Main/MTP profile 的单 token/head 物理 payload 为：
 | BF16 | 512 B | 512 B | 1024 B |
 | INT8-G64 | 256 B + 8 B | 256 B + 8 B | 528 B |
 | FP8-E4M3FN-row256 | 256 B + 2 B | 256 B + 2 B | 516 B |
-| NVFP4-G16 | 128 B + 16 B | 128 B + 16 B | 288 B |
+| NVFP4-G16 / NVFP4-G16-FP8QK | 128 B + 16 B | 128 B + 16 B | 288 B |
 | K8V4 | 256 B + 2 B | 128 B + 16 B | 402 B |
 
 K/V 的 code 和 scale planes 具有各自的 dtype、leading extent 和 group size；它们仍共享 page-group
