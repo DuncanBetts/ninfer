@@ -66,6 +66,20 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
     return KvCapacityPolicy::explicit_capacity(parse_u32(text, "kv-capacity"));
 }
 
+std::size_t parse_headroom_mib(const char* text) {
+    constexpr std::string_view kDigits = "0123456789";
+    if (text == nullptr || *text == '\0' ||
+        std::string_view(text).find_first_not_of(kDigits) != std::string_view::npos) {
+        throw std::invalid_argument(
+            "--kv-auto-headroom-mib requires a nonnegative integer MiB value");
+    }
+    const std::uint64_t mib = parse_u64(text, "--kv-auto-headroom-mib");
+    if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+        throw std::invalid_argument("--kv-auto-headroom-mib is out of range");
+    }
+    return static_cast<std::size_t>(mib << 20);
+}
+
 ReasoningEffort parse_reasoning_effort(std::string_view text) {
     if (text == "none") { return ReasoningEffort::None; }
     if (text == "minimal") { return ReasoningEffort::Minimal; }
@@ -82,7 +96,7 @@ ReasoningEffort parse_reasoning_effort(std::string_view text) {
 std::string usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
-           "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
+           "       [--max-context N] [--kv-capacity N|auto] [--kv-auto-headroom-mib N] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens "
            "N]\n"
@@ -104,7 +118,12 @@ std::string usage_text(const char* argv0) {
            "toward --max-new.\n"
            "--kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB of sizing headroom.\n"
+           " MiB of sizing headroom. --kv-auto-headroom-mib N (for example 700) overrides that\n"
+           "reserve; it defaults to " +
+           std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
+           " MiB when omitted and requires --kv-capacity auto. 0\n"
+           "disables the extra sizing reserve; unmodeled allocations may fail during startup or\n"
+           "execution.\n"
            "Sampling defaults come from the loaded model and thinking mode; flags override "
            "individual fields.\n";
 }
@@ -118,6 +137,8 @@ Options parse_options(int argc, char** argv) {
     if (argc < 2) { throw std::invalid_argument(".ninfer model path is required"); }
     options.artifact_path     = argv[1];
     bool kv_capacity_explicit = false;
+    bool kv_auto_headroom_explicit = false;
+    std::size_t kv_auto_headroom_bytes = 0;
 
     for (int i = 2; i < argc; ++i) {
         const std::string_view arg(argv[i]);
@@ -139,6 +160,9 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--kv-capacity") {
             options.kv_capacity  = parse_kv_capacity(value(arg));
             kv_capacity_explicit = true;
+        } else if (arg == "--kv-auto-headroom-mib") {
+            kv_auto_headroom_bytes = parse_headroom_mib(value(arg));
+            kv_auto_headroom_explicit = true;
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
         } else if (arg == "--device") {
@@ -209,6 +233,12 @@ Options parse_options(int argc, char** argv) {
 
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+    if (kv_auto_headroom_explicit) {
+        if (options.kv_capacity.mode != KvCapacityMode::Automatic) {
+            throw std::invalid_argument("--kv-auto-headroom-mib requires --kv-capacity auto");
+        }
+        options.kv_capacity = KvCapacityPolicy::automatic(kv_auto_headroom_bytes);
     }
 
     const bool has_prompt   = !options.prompt.empty();

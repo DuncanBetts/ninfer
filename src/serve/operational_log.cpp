@@ -441,13 +441,14 @@ void OperationalLog::engine_capacity(const GenerationService& service) const {
     const ninfer::ContextCacheOptions& cache      = engine.context_cache;
     const ninfer::ContextCostSummary context_cost = service.load_summary().context_cost;
 
-    logger_->info("capacity | KV {} tokens, {}, {} | pages {}/{} | runtime {} | free {}",
+    logger_->info("capacity | KV {} tokens, {}, {} | pages {}/{} | runtime {} | free {} | headroom {}",
                   product::format_pretty_count(memory.kv_capacity), kv_cache_name(memory.kv_cache),
                   kv_capacity_mode_name(memory.kv_capacity_mode),
                   product::format_pretty_count(memory.kv_capacity_page_groups),
                   product::format_pretty_count(memory.kv_capacity_max_page_groups),
                   product::format_pretty_bytes(memory.runtime_reservation_bytes),
-                  product::format_pretty_bytes(memory.available_after_startup_bytes));
+                  product::format_pretty_bytes(memory.available_after_startup_bytes),
+                  product::format_pretty_bytes(memory.kv_capacity_headroom_bytes));
 
     logger_->info("context | history {} | {} active + {} extra device states | host {}",
                   cache.enabled ? "on" : "off", engine.max_concurrency, *cache.device_state_slots,

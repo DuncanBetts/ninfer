@@ -22,6 +22,15 @@ bool rejects(const std::function<void()>& operation) {
     return false;
 }
 
+bool rejects_with(const std::function<void()>& operation, const std::string& fragment) {
+    try {
+        operation();
+    } catch (const std::invalid_argument& error) {
+        return std::string(error.what()).find(fragment) != std::string::npos;
+    }
+    return false;
+}
+
 int check(bool condition, const char* message) {
     if (condition) { return 0; }
     std::cerr << message << '\n';
@@ -104,5 +113,80 @@ int main() {
                   (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--top-k", "21"});
               }),
               "CLI accepted top_k beyond the executable candidate domain");
+    const ninfer::cli::Options automatic =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-capacity", "auto"});
+    failures += check(automatic.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&
+                          automatic.kv_capacity.explicit_tokens == 0 &&
+                          automatic.kv_capacity.automatic_headroom_bytes ==
+                              ninfer::kDefaultKvCapacityHeadroomBytes,
+                      "--kv-capacity auto did not keep the default sizing headroom");
+    const ninfer::cli::Options headed =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-capacity", "auto",
+               "--kv-auto-headroom-mib", "700"});
+    const ninfer::cli::Options headed_reordered =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-auto-headroom-mib", "700",
+               "--kv-capacity", "auto"});
+    failures += check(headed.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&
+                          headed.kv_capacity.automatic_headroom_bytes == (700ULL << 20) &&
+                          headed_reordered.kv_capacity.automatic_headroom_bytes == (700ULL << 20),
+                      "--kv-auto-headroom-mib 700 did not reach automatic sizing in both orders");
+    const ninfer::cli::Options zero_headroom =
+        parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-capacity", "auto",
+               "--kv-auto-headroom-mib", "0"});
+    failures += check(zero_headroom.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&
+                          zero_headroom.kv_capacity.automatic_headroom_bytes == 0,
+                      "--kv-auto-headroom-mib 0 did not disable the sizing reserve");
+    failures += check(
+        rejects_with(
+            [] {
+                (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-capacity",
+                             "8192", "--kv-auto-headroom-mib", "700"});
+            },
+            "--kv-auto-headroom-mib requires --kv-capacity auto"),
+        "CLI accepted a headroom reserve with explicit KV capacity");
+    failures += check(
+        rejects_with(
+            [] {
+                (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                             "--kv-auto-headroom-mib", "700"});
+            },
+            "--kv-auto-headroom-mib requires --kv-capacity auto"),
+        "CLI accepted a headroom reserve with omitted KV capacity");
+    for (const char* bad : {"", "0x10", "1.5", "-1", " -18446744073709551615", "700 ", " 700",
+                            "+700"}) {
+        failures += check(
+            rejects_with(
+                [&] {
+                    (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-capacity",
+                                 "auto", "--kv-auto-headroom-mib", bad});
+                },
+                "--kv-auto-headroom-mib requires a nonnegative integer MiB value"),
+            (std::string("CLI accepted an invalid headroom value: ") + bad).c_str());
+    }
+    failures += check(
+        rejects_with(
+            [] {
+                (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-capacity",
+                             "auto", "--kv-auto-headroom-mib", "18446744073709551616"});
+            },
+            "invalid --kv-auto-headroom-mib"),
+        "CLI accepted an overflowing headroom value");
+    failures += check(
+        rejects_with(
+            [] {
+                (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-capacity",
+                             "auto", "--kv-auto-headroom-mib", "17592186044416"});
+            },
+            "--kv-auto-headroom-mib is out of range"),
+        "CLI accepted a headroom value beyond the byte range");
+    failures += check(
+        rejects([] {
+            (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-capacity", "auto",
+                         "--kv-auto-headroom-mib"});
+        }),
+        "CLI accepted a missing headroom value");
+    failures += check(ninfer::cli::usage_text("ninfer-cli").find("--kv-auto-headroom-mib") !=
+                          std::string::npos,
+                      "CLI help omits --kv-auto-headroom-mib");
     return failures == 0 ? 0 : 1;
 }

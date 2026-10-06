@@ -1,8 +1,10 @@
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
+#include <functional>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,6 +24,15 @@ ServeOptions parse(std::vector<std::string> arguments) {
     argv.reserve(arguments.size());
     for (std::string& argument : arguments) { argv.push_back(argument.data()); }
     return parse_serve_options(static_cast<int>(argv.size()), argv.data());
+}
+
+bool rejects_with(const std::function<void()>& operation, const std::string& fragment) {
+    try {
+        operation();
+    } catch (const std::invalid_argument& error) {
+        return std::string(error.what()).find(fragment) != std::string::npos;
+    }
+    return false;
 }
 
 } // namespace
@@ -402,6 +413,72 @@ int main() {
                           automatic.kv_capacity.automatic_headroom_bytes ==
                               ninfer::kDefaultKvCapacityHeadroomBytes,
                       "--kv-capacity auto did not select automatic sizing");
+    const ServeOptions headed =
+        parse({"ninfer-serve", "model.ninfer", "--kv-capacity", "auto", "--kv-auto-headroom-mib",
+               "700"});
+    const ServeOptions headed_reordered =
+        parse({"ninfer-serve", "model.ninfer", "--kv-auto-headroom-mib", "700", "--kv-capacity",
+               "auto"});
+    failures += check(headed.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&
+                          headed.kv_capacity.automatic_headroom_bytes == (700ULL << 20) &&
+                          headed_reordered.kv_capacity.automatic_headroom_bytes == (700ULL << 20),
+                      "--kv-auto-headroom-mib 700 did not reach automatic sizing in both orders");
+    const ServeOptions zero_headroom = parse({"ninfer-serve", "model.ninfer", "--kv-capacity",
+                                              "auto", "--kv-auto-headroom-mib", "0"});
+    failures += check(zero_headroom.kv_capacity.mode == ninfer::KvCapacityMode::Automatic &&
+                          zero_headroom.kv_capacity.automatic_headroom_bytes == 0,
+                      "--kv-auto-headroom-mib 0 did not disable the sizing reserve");
+    failures += check(
+        rejects_with(
+            [] {
+                (void)parse({"ninfer-serve", "model.ninfer", "--kv-capacity", "8192",
+                             "--kv-auto-headroom-mib", "700"});
+            },
+            "--kv-auto-headroom-mib requires --kv-capacity auto"),
+        "serve accepted a headroom reserve with explicit KV capacity");
+    failures += check(
+        rejects_with(
+            [] { (void)parse({"ninfer-serve", "model.ninfer", "--kv-auto-headroom-mib", "700"}); },
+            "--kv-auto-headroom-mib requires --kv-capacity auto"),
+        "serve accepted a headroom reserve with omitted KV capacity");
+    for (const char* bad : {"", "0x10", "1.5", "-1", " -18446744073709551615", "700 ", " 700",
+                            "+700"}) {
+        failures += check(
+            rejects_with(
+                [&] {
+                    (void)parse({"ninfer-serve", "model.ninfer", "--kv-capacity", "auto",
+                                 "--kv-auto-headroom-mib", bad});
+                },
+                "--kv-auto-headroom-mib requires a nonnegative integer MiB value"),
+            (std::string("serve accepted an invalid headroom value: ") + bad).c_str());
+    }
+    failures += check(
+        rejects_with(
+            [] {
+                (void)parse({"ninfer-serve", "model.ninfer", "--kv-capacity", "auto",
+                             "--kv-auto-headroom-mib", "18446744073709551616"});
+            },
+            "invalid --kv-auto-headroom-mib"),
+        "serve accepted an overflowing headroom value");
+    failures += check(
+        rejects_with(
+            [] {
+                (void)parse({"ninfer-serve", "model.ninfer", "--kv-capacity", "auto",
+                             "--kv-auto-headroom-mib", "17592186044416"});
+            },
+            "--kv-auto-headroom-mib is out of range"),
+        "serve accepted a headroom value beyond the byte range");
+    {
+        bool missing_headroom_rejected = false;
+        try {
+            (void)parse(
+                {"ninfer-serve", "model.ninfer", "--kv-capacity", "auto", "--kv-auto-headroom-mib"});
+        } catch (const std::invalid_argument&) { missing_headroom_rejected = true; }
+        failures += check(missing_headroom_rejected, "serve accepted a missing headroom value");
+    }
+    failures += check(serve_usage_text("ninfer-serve").find("--kv-auto-headroom-mib") !=
+                          std::string::npos,
+                      "serve help omits --kv-auto-headroom-mib");
 
     const ServeOptions logged = parse({"ninfer-serve", "model.ninfer", "--request-log-jsonl",
                                        "requests.jsonl", "--api-key", "do-not-log"});

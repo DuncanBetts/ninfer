@@ -763,6 +763,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--model-id ID` | override the public OpenAI model alias | artifact `metadata.name`, or architecture name |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
+| `--kv-auto-headroom-mib N` | automatic sizing reserve in integer MiB; default `1024`; only valid with `--kv-capacity auto`; `0` allowed | `1024` |
 | `--max-concurrency N` | resident execution lanes; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
@@ -1026,8 +1027,12 @@ outside the GPU executor and do not delay formation of the next batch.
 
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
-and leaves 1 GiB of sizing headroom; omitting the option makes it follow `--max-context`. Capacity
-resolves once at startup.
+and leaves 1 GiB of sizing headroom; `--kv-auto-headroom-mib N` overrides that reserve (default
+1024 MiB, only valid with `--kv-capacity auto`). `0` disables the extra sizing reserve, after which
+unmodeled allocations may fail during startup or execution. Omitting the option makes it follow
+`--max-context`. Capacity resolves once at startup. The startup capacity line reports the effective
+automatic sizing reserve; it is a sizing reserve, not a separate allocation or guaranteed free memory
+after startup.
 
 Before each prefill, decode or replay unit, the runtime reserves the additional pages and temporary
 storage required by that unit. It first reclaims inactive cache resources when capacity is short.

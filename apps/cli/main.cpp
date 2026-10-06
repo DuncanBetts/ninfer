@@ -286,6 +286,13 @@ int main(int argc, char** argv) {
 
         ninfer::Engine engine(std::move(engine_options));
         startup_log.engine_ready(engine.load_summary());
+        {
+            const ninfer::MemorySummary capacity = engine.memory_summary();
+            logger->info("capacity | KV {} tokens, {} | automatic sizing headroom {}",
+                         capacity.kv_capacity,
+                         format_kv_capacity_mode(capacity.kv_capacity_mode),
+                         format_bytes(capacity.kv_capacity_headroom_bytes));
+        }
         engine.reset_memory_peaks();
 
         ninfer::PreparedPrompt prompt = engine.prepare(std::move(input));

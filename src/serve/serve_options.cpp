@@ -110,12 +110,26 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
     return KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(value));
 }
 
+std::size_t parse_headroom_mib(const char* text) {
+    constexpr std::string_view kDigits = "0123456789";
+    if (text == nullptr || *text == '\0' ||
+        std::string_view(text).find_first_not_of(kDigits) != std::string_view::npos) {
+        throw std::invalid_argument(
+            "--kv-auto-headroom-mib requires a nonnegative integer MiB value");
+    }
+    const std::uint64_t mib = parse_u64(text, "--kv-auto-headroom-mib");
+    if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+        throw std::invalid_argument("--kv-auto-headroom-mib is out of range");
+    }
+    return static_cast<std::size_t>(mib << 20);
+}
+
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--kv-auto-headroom-mib N] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -148,7 +162,11 @@ std::string serve_usage_text(const char* argv0) {
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB of sizing headroom\n"
+           " MiB of sizing headroom. --kv-auto-headroom-mib N (for example 700) overrides that\n"
+           "       reserve; it defaults to " +
+           std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
+           " MiB when omitted and requires --kv-capacity auto. 0 disables the extra sizing\n"
+           "       reserve; unmodeled allocations may fail during startup or execution\n"
            "       --no-prefix-reuse disables cross-request history; request pause/replay "
            "resources remain available\n"
            "       context defaults: device-state=max-concurrency; Host budget is resolved from "
@@ -178,7 +196,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         redact_next = options.startup_argv.back() == "--api-key";
     }
     bool default_max_tokens_explicit = false;
-    bool kv_capacity_explicit        = false;
+    bool kv_capacity_explicit = false;
+    bool kv_auto_headroom_explicit = false;
+    std::size_t kv_auto_headroom_bytes = 0;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -208,6 +228,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--kv-capacity") {
             options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
             kv_capacity_explicit = true;
+        } else if (arg == "--kv-auto-headroom-mib") {
+            kv_auto_headroom_bytes = parse_headroom_mib(require_value("--kv-auto-headroom-mib"));
+            kv_auto_headroom_explicit = true;
         } else if (arg == "--max-concurrency") {
             options.max_concurrency = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-concurrency"), "max-concurrency"));
@@ -349,6 +372,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
+    }
+    if (kv_auto_headroom_explicit) {
+        if (options.kv_capacity.mode != KvCapacityMode::Automatic) {
+            throw std::invalid_argument("--kv-auto-headroom-mib requires --kv-capacity auto");
+        }
+        options.kv_capacity = KvCapacityPolicy::automatic(kv_auto_headroom_bytes);
     }
     options.context_cache.enabled = options.allow_prefix_reuse;
     if (options.port <= 0 || options.port > 65535) {
